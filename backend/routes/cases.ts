@@ -1,30 +1,46 @@
+// Fix: Use explicit 'express.Request' and 'express.Response' types to avoid conflicts with global DOM types.
+// FIX: Changed import to directly use Request and Response types from express.
 import express, { Request, Response } from 'express';
 import { authMiddleware } from '../middleware/authMiddleware.js';
-import pool from '../db/pool.js';
-import type { CaseData } from '../../types';
+import pool from '../db.js';
+import type { AppState, CaseData, FocusOptions } from '../../types';
 
 const router = express.Router();
 
 // Apply the authentication middleware to all routes in this file
 router.use(authMiddleware);
 
+interface CaseDbRow {
+    id: string;
+    name: string;
+    created_at: string;
+    owner: string;
+    focus_options: FocusOptions;
+    focus_text: string;
+    initial_report: string | null;
+    comparison_report: string | null;
+    app_state: AppState;
+}
+
 // GET /api/cases - Get cases based on user role
+// FIX: Use explicit Request and Response types from express to fix method errors like .json and .status.
+// FIX: Changed types from express.Request to Request.
 router.get('/', async (req: Request, res: Response) => {
-    // @ts-ignore
+    // @ts-ignore - 'user' is added by authMiddleware
     const { username, role } = req.user;
 
     try {
         let query;
-        const params = [];
+        const params: string[] = [];
         if (role === 'admin') {
             query = 'SELECT * FROM cases ORDER BY created_at DESC';
         } else {
             query = 'SELECT * FROM cases WHERE owner = $1 ORDER BY created_at DESC';
             params.push(username);
         }
-        const result = await pool.query(query, params);
+        const result = await pool.query<CaseDbRow>(query, params);
         // Convert snake_case from DB to camelCase for the frontend
-        const cases = result.rows.map(row => ({
+        const cases: CaseData[] = result.rows.map(row => ({
             id: row.id,
             name: row.name,
             createdAt: row.created_at,
@@ -44,8 +60,10 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 // POST /api/cases - Create a new case
+// FIX: Use explicit Request and Response types from express to fix property errors like .body and .status.
+// FIX: Changed types from express.Request to Request.
 router.post('/', async (req: Request, res: Response) => {
-    // @ts-ignore
+    // @ts-ignore - 'user' is added by authMiddleware
     const { username } = req.user;
     const { name } = req.body;
 
@@ -60,9 +78,9 @@ router.post('/', async (req: Request, res: Response) => {
             RETURNING *;
         `;
         const focusOptions = { negligence: false, causation: false, lifeExpectancy: false };
-        const values = [name.trim(), username, focusOptions, '', 'idle'];
+        const values = [name.trim(), username, JSON.stringify(focusOptions), '', 'idle'];
         
-        const result = await pool.query(query, values);
+        const result = await pool.query<CaseDbRow>(query, values);
         const newCaseRow = result.rows[0];
         
         const newCase: CaseData = {
@@ -86,15 +104,17 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 // PUT /api/cases/:id - Update an existing case
+// FIX: Use explicit Request and Response types from express to fix property errors like .params, .body, and .status.
+// FIX: Changed types from express.Request to Request.
 router.put('/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const caseUpdates: Partial<CaseData> = req.body;
-    // @ts-ignore
+    // @ts-ignore - 'user' is added by authMiddleware
     const { username, role } = req.user;
 
     try {
         const findQuery = 'SELECT owner FROM cases WHERE id = $1';
-        const findResult = await pool.query(findQuery, [id]);
+        const findResult = await pool.query<{ owner: string }>(findQuery, [id]);
 
         if (findResult.rows.length === 0) {
             return res.status(404).json({ message: 'Case not found' });
@@ -119,7 +139,7 @@ router.put('/:id', async (req: Request, res: Response) => {
         `;
         
         // Fetch current case to merge with updates
-        const currentCaseResult = await pool.query('SELECT * FROM cases WHERE id = $1', [id]);
+        const currentCaseResult = await pool.query<CaseDbRow>('SELECT * FROM cases WHERE id = $1', [id]);
         const currentCase = currentCaseResult.rows[0];
 
         const values = [
@@ -132,7 +152,7 @@ router.put('/:id', async (req: Request, res: Response) => {
             id
         ];
         
-        const result = await pool.query(updateQuery, values);
+        const result = await pool.query<CaseDbRow>(updateQuery, values);
         const updatedCaseRow = result.rows[0];
 
         const updatedCase: CaseData = {
@@ -156,14 +176,16 @@ router.put('/:id', async (req: Request, res: Response) => {
 });
 
 // DELETE /api/cases/:id - Delete a case
+// FIX: Use explicit Request and Response types from express to fix property errors like .params and .status.
+// FIX: Changed types from express.Request to Request.
 router.delete('/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
-    // @ts-ignore
+    // @ts-ignore - 'user' is added by authMiddleware
     const { username, role } = req.user;
     
     try {
         const findQuery = 'SELECT owner FROM cases WHERE id = $1';
-        const findResult = await pool.query(findQuery, [id]);
+        const findResult = await pool.query<{ owner: string }>(findQuery, [id]);
 
         if (findResult.rows.length === 0) {
             // If it doesn't exist, it's already "deleted". No need to error.

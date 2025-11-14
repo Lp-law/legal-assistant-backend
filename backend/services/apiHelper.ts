@@ -1,7 +1,13 @@
 // In a real deployment, this would be your backend URL (e.g., https://your-api.com)
-// Using an environment variable allows us to switch between local and production.
-// Fix: Cast `import.meta` to `any` to resolve the TypeScript error "Property 'env' does not exist on type 'ImportMeta'".
-const API_BASE_URL = (import.meta as any).env.VITE_API_BASE_URL || 'http://localhost:3001/api';
+const IS_PROD = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
+
+// IMPORTANT: After deploying your backend to a service like Render,
+// replace the placeholder URL below with your actual live backend URL.
+// Example: const PROD_API_URL = 'https://legal-assistant-backend-xyz.onrender.com/api';
+const PROD_API_URL = 'https://your-backend-service-url.onrender.com/api'; 
+
+const API_BASE_URL = IS_PROD ? PROD_API_URL : 'http://localhost:3001/api';
+
 
 const getAuthToken = (): string | null => {
     try {
