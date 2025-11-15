@@ -3,7 +3,7 @@
 import express, { Request, Response } from 'express';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import pool from '../db.js';
-import type { AppState, CaseData, FocusOptions } from '../../types';
+import type { AppState, CaseData, FocusOptions } from '../types';
 
 const router = express.Router();
 

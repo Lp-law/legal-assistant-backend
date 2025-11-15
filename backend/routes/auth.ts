@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import pool from '../db.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
-import type { User } from '../../types';
+import type { User } from '../types';
 
 const router = express.Router();
 

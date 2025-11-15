@@ -7,7 +7,7 @@ import authRoutes from './routes/auth.js';
 import caseRoutes from './routes/cases.js';
 import { authMiddleware } from './middleware/authMiddleware.js';
 import pool from './db.js';
-import type { User } from '../types';
+import type { User } from './types';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
