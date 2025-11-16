@@ -569,27 +569,30 @@ router.post("/:id/comparison-report", async (req: Request, res: Response) => {
     }
 
     const prompt = `
-Compare the following two expert medical-legal opinions related to the same malpractice case.
+אתה מומחה רפואי-משפטי. השווה בין שתי חוות דעת רפואיות באותו תיק רשלנות רפואית. חשוב: כתוב את כל הדו"ח בעברית מקצועית ומאוזנת.
 
-Case Name: ${caseRow.name}
-Focus Notes: ${caseRow.focus_text || "None"}
+שם התיק: ${caseRow.name}
+הערות פוקוס: ${caseRow.focus_text || "אין הערות מיוחדות"}
 
-Opinion A (${docA.originalFilename}):
+חוות דעת א (${docA.originalFilename}):
 ${truncateForPrompt(docAText)}
 
-Opinion B (${docB.originalFilename}):
+חוות דעת ב (${docB.originalFilename}):
 ${truncateForPrompt(docBText)}
 
-Produce an English report with:
-1. Brief synopsis of each opinion.
-2. Agreements and disagreements across: diagnosis, causation, standard of care, prognosis/life expectancy.
-3. Assessment of evidentiary strength (which opinion cites stronger data and why).
-4. Actionable recommendations for defense counsel (e.g., data to obtain, questions for experts, literature to consult).
-Use headings, bullet points, and a neutral professional tone.`;
+בנה דו"ח בעברית עם המבנה הבא:
+1. תקציר קצר לכל חוות דעת.
+2. נקודות הסכמה והבדלים בין חוות הדעת לפי: אבחנה, קשר סיבתי, סטנדרט טיפול, נזק/פרוגנוזה/תוחלת חיים.
+3. הערכת חוזק הראיות של כל צד (מי מסתמך על מקורות חזקים יותר ולמה).
+4. המלצות אופרטיביות לצוות ההגנה – אילו נתונים לחפש, אילו שאלות להעלות, אילו מקורות ספרות לבדוק.
+שמור על טון נייטרלי, אנליטי ולא משפטי.`;
 
     const comparisonText = await callOpenAI({
       messages: [
-        { role: "system", content: "You are an impartial medical-legal analyst comparing expert opinions." },
+        {
+          role: "system",
+          content: "You are an impartial medical-legal analyst comparing expert opinions. Always respond in Hebrew.",
+        },
         { role: "user", content: prompt },
       ],
       maxTokens: 1600,
