@@ -121,15 +121,6 @@ const getCaseDocuments = async (caseId: string): Promise<CaseDocument[]> => {
   return result.rows.map(mapDocumentRowToDocument);
 };
 
-interface AiUsageActivityRow {
-  id: string;
-  action: string;
-  status: "success" | "error";
-  duration_ms: number | null;
-  cost_usd: number | null;
-  created_at: string;
-}
-
 const getCaseDocumentById = async (
   caseId: string,
   documentId: string
@@ -461,86 +452,6 @@ router.get("/:id/documents", async (req: Request, res: Response) => {
     res.json(documents.map(summarizeDocument));
   } catch (error) {
     console.error("Error fetching case documents:", error);
-    res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-router.get("/:id/activity", async (req: Request, res: Response) => {
-  const user = requireUser(req, res);
-  if (!user) {
-    return;
-  }
-
-  const { id } = req.params;
-  const limit = Math.min(Number.parseInt((req.query.limit as string) ?? "", 10) || 60, 200);
-
-  try {
-    const caseRow = await getCaseRow(id);
-
-    if (!caseRow) {
-      return res.status(404).json({ message: "Case not found" });
-    }
-
-    if (!canAccessCase(user, caseRow)) {
-      return res.status(403).json({ message: "Forbidden: You do not have permission to view this case activity." });
-    }
-
-    const [documentsResult, aiUsageResult] = await Promise.all([
-      pool.query<CaseDocumentRow>(
-        `
-          SELECT id, original_filename, size_bytes, created_at
-          FROM case_documents
-          WHERE case_id = $1
-          ORDER BY created_at DESC
-          LIMIT $2;
-        `,
-        [id, limit]
-      ),
-      pool.query<AiUsageActivityRow>(
-        `
-          SELECT id, action, status, duration_ms, cost_usd, created_at
-          FROM ai_usage_logs
-          WHERE case_id = $1
-          ORDER BY created_at DESC
-          LIMIT $2;
-        `,
-        [id, limit]
-      ),
-    ]);
-
-    const documentEvents: CaseActivityEvent[] = documentsResult.rows.map((row) => ({
-      type: "document-upload",
-      id: row.id,
-      createdAt: row.created_at,
-      metadata: {
-        originalFilename: row.original_filename,
-        sizeBytes: row.size_bytes,
-      },
-    }));
-
-    const aiEvents: CaseActivityEvent[] = aiUsageResult.rows.map((row) => ({
-      type: "ai-event",
-      id: row.id,
-      createdAt: row.created_at,
-      metadata: {
-        action: row.action,
-        status: row.status,
-        durationMs: row.duration_ms,
-        costUsd: row.cost_usd !== null ? Number(row.cost_usd) : null,
-      },
-    }));
-
-    const merged = [...documentEvents, ...aiEvents].sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
-
-    const payload: CaseActivityResponse = {
-      events: merged.slice(0, limit),
-    };
-
-    res.json(payload);
-  } catch (error) {
-    console.error("Error fetching case activity:", error);
     res.status(500).json({ message: "Internal server error" });
   }
 });
