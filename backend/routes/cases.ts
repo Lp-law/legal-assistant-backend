@@ -32,6 +32,20 @@ const uploadDocumentsMiddleware = upload.array("files");
 const DOCUMENT_PREVIEW_LENGTH = 400;
 const PROMPT_DOCUMENT_CHAR_LIMIT = 6000;
 
+const garbledFilenamePattern = /[ÃÂÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/;
+
+const normalizeFilename = (value: string): string => {
+  if (!value) {
+    return value;
+  }
+  const converted = Buffer.from(value, "latin1").toString("utf8");
+  const hasReplacement = converted.includes("\uFFFD");
+  if (!hasReplacement && (converted !== value || garbledFilenamePattern.test(value))) {
+    return converted;
+  }
+  return value;
+};
+
 type CaseDocumentSummary = Omit<CaseDocument, "extractedText"> & {
   extractedTextPreview: string | null;
 };
@@ -61,7 +75,7 @@ const mapCaseRowToCaseData = (row: CaseDbRow): CaseData => ({
 const mapDocumentRowToDocument = (row: CaseDocumentRow): CaseDocument => ({
   id: row.id,
   caseId: row.case_id,
-  originalFilename: row.original_filename,
+  originalFilename: normalizeFilename(row.original_filename),
   mimeType: row.mime_type,
   sizeBytes: row.size_bytes,
   extractedText: row.extracted_text,
@@ -328,10 +342,11 @@ router.post("/:id/documents", (req: Request, res: Response) => {
       const errors: string[] = [];
 
       for (const file of files) {
+        const normalizedFilename = normalizeFilename(file.originalname);
         try {
           const docType = resolveDocumentType(file);
           if (!docType) {
-            errors.push(`${file.originalname}: Unsupported file type. Upload PDF או DOCX בלבד.`);
+            errors.push(`${normalizedFilename}: Unsupported file type. Upload PDF או DOCX בלבד.`);
             continue;
           }
 
@@ -350,13 +365,13 @@ router.post("/:id/documents", (req: Request, res: Response) => {
               VALUES ($1, $2, $3, $4, $5, $6)
               RETURNING *;
             `,
-            [uuidv4(), id, file.originalname, file.mimetype, file.size, extractedText]
+            [uuidv4(), id, normalizedFilename, file.mimetype, file.size, extractedText]
           );
 
           insertedDocuments.push(mapDocumentRowToDocument(insertResult.rows[0]));
         } catch (error) {
           console.error("Error processing uploaded document:", error);
-          errors.push(`${file.originalname}: Failed to process file.`);
+          errors.push(`${normalizedFilename}: Failed to process file.`);
         }
       }
 
@@ -427,6 +442,44 @@ router.get("/:id/documents/:docId", async (req: Request, res: Response) => {
     res.json(document);
   } catch (error) {
     console.error("Error fetching document:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.delete("/:id/documents/:docId", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id, docId } = req.params;
+
+  try {
+    const caseRow = await getCaseRow(id);
+
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res
+        .status(403)
+        .json({ message: "Forbidden: You do not have permission to delete documents for this case." });
+    }
+
+    const document = await getCaseDocumentById(id, docId);
+
+    if (!document) {
+      return res.status(404).json({ message: "Document not found" });
+    }
+
+    await pool.query("DELETE FROM case_documents WHERE id = $1 AND case_id = $2", [docId, id]);
+    if (caseRow.app_state === "processing") {
+      await setCaseAppState(id, "idle");
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting document:", error);
     res.status(500).json({ message: "Internal server error" });
   }
 });
