@@ -456,7 +456,7 @@ router.post("/:id/initial-report", async (req: Request, res: Response) => {
         .join(", ") || "None selected";
 
     const prompt = `
-You are an experienced medical-legal analyst. Review the malpractice case information and produce a structured English report for defense counsel.
+You are an experienced medical-legal analyst. Review the malpractice case information and produce a structured report for defense counsel. IMPORTANT: Write the entire report in professional Hebrew (ישראלית), including titles and sections.
 
 Case Name: ${caseRow.name}
 Owner: ${caseRow.owner}
@@ -467,20 +467,23 @@ ${caseRow.focus_text || "No additional focus text provided."}
 Supporting Documents:
 ${documentsContext}
 
-Write the report using the following outline:
-1. Title: "Preliminary Analysis of Plaintiff’s Medical Claims"
-2. Introductory paragraph describing the purpose of the document.
-3. Section A - Case Summary and Key Plaintiff Allegations.
-4. Section B - Potential Weaknesses (with sub-sections for negligence, causation, damages/life expectancy).
-5. Section C - Relevant Medical Literature for the Defense (list concrete article leads with journal + year + brief relevance).
-6. Section D - Practical Guidance and Focal Points for the Defense Expert.
-7. Section E - Missing Information and Recommended Next Steps.
+כתוב את הדו"ח במבנה הבא (עדיין בעברית):
+1. כותרת: "ניתוח מקדמי של טענות התובע".
+2. פסקת פתיחה קצרה המבהירה את מטרת המסמך.
+3. סעיף א – תקציר המקרה והטענות המרכזיות של התובע.
+4. סעיף ב – נקודות חולשה פוטנציאליות בטענות התובע (תתי-סעיפים לרשלנות, קשר סיבתי, נזק/תוחלת חיים).
+5. סעיף ג – ספרות רפואית רלוונטית להגנה (שם מאמר, כתב עת, שנה וקשר להגנה).
+6. סעיף ד – הנחיות מעשיות ונקודות פוקוס למומחה ההגנה.
+7. סעיף ה – מידע חסר והמלצות להמשך.
 
-Tone: neutral, analytical, professional, no legal advice.`;
+הסגנון צריך להיות מקצועי, אנליטי ונייטרלי, ללא ניסוח של ייעוץ משפטי.`;
 
     const reportText = await callOpenAI({
       messages: [
-        { role: "system", content: "You are a meticulous medical-legal analyst supporting defense counsel." },
+        {
+          role: "system",
+          content: "You are a meticulous medical-legal analyst supporting defense counsel. Always answer in fluent Hebrew.",
+        },
         { role: "user", content: prompt },
       ],
       maxTokens: 2200,
