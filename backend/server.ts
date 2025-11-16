@@ -1,5 +1,5 @@
 import "dotenv/config";
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors, { CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
 
@@ -19,7 +19,7 @@ const allowedOrigins = new Set(
 );
 
 const corsOptions: CorsOptions = {
-  origin(origin, callback) {
+  origin(origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
     if (!origin) {
       return callback(null, true);
     }
@@ -34,7 +34,7 @@ const corsOptions: CorsOptions = {
   credentials: true,
 };
 
-app.use((req, res, next) => {
+app.use((req: Request, res: Response, next: NextFunction) => {
   const origin = req.headers.origin;
   if (origin && !allowedOrigins.has(origin) && process.env.NODE_ENV !== "production") {
     console.warn(`CORS warning: received request from unlisted origin ${origin}`);
@@ -47,7 +47,7 @@ app.use(express.json());
 app.use(cookieParser());
 
 // Health check
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", (_req: Request, res: Response) => {
   res.json({ ok: true, message: "Backend is running" });
 });
 
