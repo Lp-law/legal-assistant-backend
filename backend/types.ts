@@ -87,7 +87,73 @@ export interface LiteratureReviewResult {
   searchSuggestions?: string[];
 }
 
+export type CaseActivityEventType = "case-created" | "document-uploaded" | "ai-event";
+
+export interface CaseActivityEvent {
+  id: string;
+  type: CaseActivityEventType;
+  title: string;
+  description: string;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AiUsageLogRow {
+  id: string;
+  case_id: string;
+  username: string;
+  action: string;
+  status: string;
+  model: string | null;
+  duration_ms: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  cost_usd: number | null;
+  error_message: string | null;
+  created_at: string;
+}
+
 export interface ApiErrorResponse {
   message: string;
   details?: string;
+}
+
+export interface AiUsageSummary {
+  totalCalls: number;
+  totalCostUsd: number;
+  avgDurationMs: number;
+  totalTokens: number;
+}
+
+export interface AiUsageByAction {
+  action: string;
+  totalCalls: number;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  avgDurationMs: number;
+}
+
+export interface AiUsageRecentEvent {
+  id: string;
+  caseId: string;
+  username: string;
+  action: string;
+  status: "success" | "error";
+  durationMs: number | null;
+  costUsd: number | null;
+  createdAt: string;
+}
+
+export interface AiUsageSummaryResponse {
+  rangeDays: number;
+  summary: AiUsageSummary;
+  byAction: AiUsageByAction[];
+  recent: AiUsageRecentEvent[];
+}
+
+export interface CaseActivityResponse {
+  events: CaseActivityEvent[];
 }
