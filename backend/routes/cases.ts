@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import multer from "multer";
+import multer, { MulterError } from "multer";
 import { v4 as uuidv4 } from "uuid";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 import pool from "../db.js";
@@ -27,6 +27,7 @@ const upload = multer({
     files: 5,
   },
 });
+const uploadDocumentsMiddleware = upload.array("files");
 
 const DOCUMENT_PREVIEW_LENGTH = 400;
 const PROMPT_DOCUMENT_CHAR_LIMIT = 6000;
@@ -285,76 +286,90 @@ router.delete("/:id", async (req: Request, res: Response) => {
   }
 });
 
-router.post("/:id/documents", upload.array("files"), async (req: Request, res: Response) => {
-  const user = requireUser(req, res);
-  if (!user) {
-    return;
-  }
-
-  const { id } = req.params;
-
-  try {
-    const caseRow = await getCaseRow(id);
-
-    if (!caseRow) {
-      return res.status(404).json({ message: "Case not found" });
-    }
-
-    if (!canAccessCase(user, caseRow)) {
-      return res.status(403).json({ message: "Forbidden: You do not have permission to upload documents." });
-    }
-
-    const files = req.files as Express.Multer.File[] | undefined;
-
-    if (!files || files.length === 0) {
-      return res.status(400).json({ message: "No files were uploaded." });
-    }
-
-    const insertedDocuments: CaseDocument[] = [];
-    const errors: string[] = [];
-
-    for (const file of files) {
-      try {
-        const docType = resolveDocumentType(file);
-        if (!docType) {
-          errors.push(`${file.originalname}: Unsupported file type. Upload PDF or DOCX files only.`);
-          continue;
+router.post("/:id/documents", (req: Request, res: Response) => {
+  uploadDocumentsMiddleware(req, res, async (middlewareError: unknown) => {
+    if (middlewareError) {
+      if (middlewareError instanceof MulterError) {
+        if (middlewareError.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({ message: "הקובץ גדול מדי (עד 10MB לקובץ)." });
         }
-
-        const extractedText = await extractTextFromBuffer(file);
-
-        const insertResult = await pool.query<CaseDocumentRow>(
-          `
-            INSERT INTO case_documents (
-              id,
-              case_id,
-              original_filename,
-              mime_type,
-              size_bytes,
-              extracted_text
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING *;
-          `,
-          [uuidv4(), id, file.originalname, file.mimetype, file.size, extractedText]
-        );
-
-        insertedDocuments.push(mapDocumentRowToDocument(insertResult.rows[0]));
-      } catch (error) {
-        console.error("Error processing uploaded document:", error);
-        errors.push(`${file.originalname}: Failed to process file.`);
+        return res.status(400).json({ message: `שגיאת העלאה: ${middlewareError.message}` });
       }
+
+      console.error("Unexpected upload error:", middlewareError);
+      return res.status(500).json({ message: "שגיאה במהלך העלאת הקובץ." });
     }
 
-    const statusCode = insertedDocuments.length > 0 ? 201 : 400;
-    res.status(statusCode).json({
-      documents: insertedDocuments.map(summarizeDocument),
-      errors: errors.length ? errors : undefined,
-    });
-  } catch (error) {
-    console.error("Error uploading documents:", error);
-    res.status(500).json({ message: "Internal server error" });
-  }
+    const user = requireUser(req, res);
+    if (!user) {
+      return;
+    }
+
+    const { id } = req.params;
+
+    try {
+      const caseRow = await getCaseRow(id);
+
+      if (!caseRow) {
+        return res.status(404).json({ message: "Case not found" });
+      }
+
+      if (!canAccessCase(user, caseRow)) {
+        return res.status(403).json({ message: "Forbidden: You do not have permission to upload documents." });
+      }
+
+      const files = req.files as Express.Multer.File[] | undefined;
+
+      if (!files || files.length === 0) {
+        return res.status(400).json({ message: "No files were uploaded." });
+      }
+
+      const insertedDocuments: CaseDocument[] = [];
+      const errors: string[] = [];
+
+      for (const file of files) {
+        try {
+          const docType = resolveDocumentType(file);
+          if (!docType) {
+            errors.push(`${file.originalname}: Unsupported file type. Upload PDF או DOCX בלבד.`);
+            continue;
+          }
+
+          const extractedText = await extractTextFromBuffer(file);
+
+          const insertResult = await pool.query<CaseDocumentRow>(
+            `
+              INSERT INTO case_documents (
+                id,
+                case_id,
+                original_filename,
+                mime_type,
+                size_bytes,
+                extracted_text
+              )
+              VALUES ($1, $2, $3, $4, $5, $6)
+              RETURNING *;
+            `,
+            [uuidv4(), id, file.originalname, file.mimetype, file.size, extractedText]
+          );
+
+          insertedDocuments.push(mapDocumentRowToDocument(insertResult.rows[0]));
+        } catch (error) {
+          console.error("Error processing uploaded document:", error);
+          errors.push(`${file.originalname}: Failed to process file.`);
+        }
+      }
+
+      const statusCode = insertedDocuments.length > 0 ? 201 : 400;
+      res.status(statusCode).json({
+        documents: insertedDocuments.map(summarizeDocument),
+        errors: errors.length ? errors : undefined,
+      });
+    } catch (error) {
+      console.error("Error uploading documents:", error);
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
 });
 
 router.get("/:id/documents", async (req: Request, res: Response) => {
