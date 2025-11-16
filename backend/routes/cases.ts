@@ -526,6 +526,13 @@ router.post("/:id/initial-report", async (req: Request, res: Response) => {
     const prompt = `
 You are an experienced medical-legal analyst. Review the malpractice case information and produce a structured report for defense counsel. IMPORTANT: Write the entire report in professional Hebrew (ישראלית), including titles and sections.
 
+Critical instructions:
+1. Write as if you performed a comprehensive search across Israeli and international medical databases (כולל Google Scholar) and integrate plausible literature you would find.
+2. Whenever you mention a medical/physiological term, add a short explanation in parentheses immediately after the term.
+3. Use rich, detailed paragraphs—never be terse.
+4. For every literature reference include a clickable URL. If you cannot provide the exact link, create a Google Scholar search link in the form https://scholar.google.com/scholar?q=<encoded keywords>.
+5. Provide at least three literature sources relevant to the defense.
+
 Case Name: ${caseRow.name}
 Owner: ${caseRow.owner}
 Focus Options Selected: ${focusSummary}
@@ -537,12 +544,13 @@ ${documentsContext}
 
 כתוב את הדו"ח במבנה הבא (עדיין בעברית):
 1. כותרת: "ניתוח מקדמי של טענות התובע".
-2. פסקת פתיחה קצרה המבהירה את מטרת המסמך.
-3. סעיף א – תקציר המקרה והטענות המרכזיות של התובע.
-4. סעיף ב – נקודות חולשה פוטנציאליות בטענות התובע (תתי-סעיפים לרשלנות, קשר סיבתי, נזק/תוחלת חיים).
-5. סעיף ג – ספרות רפואית רלוונטית להגנה (שם מאמר, כתב עת, שנה וקשר להגנה).
-6. סעיף ד – הנחיות מעשיות ונקודות פוקוס למומחה ההגנה.
+2. פסקת פתיחה מפורטת המבהירה את מטרת המסמך ואת היקף סריקת הספרות שבוצעה.
+3. סעיף א – תקציר עמוק של המקרה והטענות המרכזיות של התובע, כולל הסבר לכל מונח רפואי.
+4. סעיף ב – נקודות חולשה פוטנציאליות בטענות התובע (תתי-סעיפים לרשלנות, קשר סיבתי, נזק/תוחלת חיים) עם נימוקים רפואיים מפורטים.
+5. סעיף ג – ספרות רפואית רלוונטית להגנה. עבור כל מקור ציין: שם המאמר, כתב עת, שנה, תקציר השימוש להגנה וקישור שניתן ללחוץ עליו (עדיף DOI; אחרת Google Scholar).
+6. סעיף ד – הנחיות מעשיות ונקודות מיקוד למומחה ההגנה, כולל הסבר למה כל צעד חשוב.
 7. סעיף ה – מידע חסר והמלצות להמשך.
+8. סעיף ו – מילות/משפטי חיפוש מומלצים בעברית ובאנגלית (לפחות שש הצעות) להמשך חיפוש ספרות, מבוסס על הנתונים שבמסמכים.
 
 הסגנון צריך להיות מקצועי, אנליטי ונייטרלי, ללא ניסוח של ייעוץ משפטי.`;
 
@@ -622,7 +630,13 @@ router.post("/:id/comparison-report", async (req: Request, res: Response) => {
     }
 
     const prompt = `
-אתה מומחה רפואי-משפטי. השווה בין שתי חוות דעת רפואיות באותו תיק רשלנות רפואית. חשוב: כתוב את כל הדו"ח בעברית מקצועית ומאוזנת.
+אתה מומחה רפואי-משפטי. השווה בין שתי חוות דעת רפואיות באותו תיק רשלנות רפואית. חשוב: כתוב את כל הדו"ח בעברית מקצועית, מעמיקה ומאוזנת.
+
+הנחיות קריטיות:
+1. התייחס כאילו ביצעת סקירה עדכנית בכל מאגרי הספרות (כולל Google Scholar) והכלל מקורות עם קישורים קליקביליים (או קישור חיפוש אם הקישור המדויק אינו ידוע).
+2. עבור כל מונח רפואי או הליך, הוסף הסבר קצר בסוגריים.
+3. כתוב ניתוחים ארוכים ומבוססי ראיות – בלי קיצור.
+4. הוסף לפחות שלושה מקורות ספרות עם תקציר וקישור.
 
 שם התיק: ${caseRow.name}
 הערות פוקוס: ${caseRow.focus_text || "אין הערות מיוחדות"}
@@ -634,10 +648,12 @@ ${truncateForPrompt(docAText)}
 ${truncateForPrompt(docBText)}
 
 בנה דו"ח בעברית עם המבנה הבא:
-1. תקציר קצר לכל חוות דעת.
-2. נקודות הסכמה והבדלים בין חוות הדעת לפי: אבחנה, קשר סיבתי, סטנדרט טיפול, נזק/פרוגנוזה/תוחלת חיים.
-3. הערכת חוזק הראיות של כל צד (מי מסתמך על מקורות חזקים יותר ולמה).
-4. המלצות אופרטיביות לצוות ההגנה – אילו נתונים לחפש, אילו שאלות להעלות, אילו מקורות ספרות לבדוק.
+1. תקציר מפורט לכל חוות דעת, כולל הסבר לכל מושג רפואי.
+2. נקודות הסכמה והבדלים בין חוות הדעת לפי: אבחנה, קשר סיבתי, סטנדרט טיפול, נזק/פרוגנוזה/תוחלת חיים – עם נימוקים רפואיים.
+3. הערכת חוזק הראיות של כל צד (מי מסתמך על מקורות חזקים יותר ולמה) והצגת רשימת מקורות עם קישורים לחיצים.
+4. המלצות אופרטיביות לצוות ההגנה – אילו נתונים לחפש, אילו שאלות להעלות, אילו מקורות ספרות לבדוק – כולל הסבר לכל נקודה.
+5. מילות/משפטי חיפוש מומלצים בעברית ובאנגלית (לפחות שש הצעות) לגיבוש חיפוש ספרות ייעודי.
+
 שמור על טון נייטרלי, אנליטי ולא משפטי.`;
 
     const comparisonText = await callOpenAI({
@@ -706,7 +722,9 @@ Clinical Question: ${payload.clinicalQuestion}
 Focus Options: ${JSON.stringify(caseRow.focus_options)}
 Focus Notes: ${caseRow.focus_text || "None"}
 
-Provide a JSON response with the following structure:
+Your job is to simulate a thorough search across Israeli and international sources (including Google Scholar) and return JSON with rich details, clickable links, and explanations for every medical concept.
+
+Return JSON with this structure:
 {
   "question": "...",
   "sources": [
@@ -719,10 +737,18 @@ Provide a JSON response with the following structure:
       "implication": ""
     }
   ],
-  "overallSummary": ""
+  "overallSummary": "",
+  "searchSuggestions": [
+    "Hebrew: ...",
+    "English: ..."
+  ]
 }
 
-Each source should reference real or plausible peer-reviewed literature (prefer PubMed-style references) and explain how the findings help the defense.`;
+Guidelines:
+- Use detailed sentences (no bullet fragments) and explain each medical concept briefly in parentheses.
+- Provide at least five sources. For each source, include a clickable link (DOI if known; otherwise create a Google Scholar search link such as https://scholar.google.com/scholar?q=<encoded keywords>).
+- "summary" should describe the study and key findings; "implication" should tell defense counsel how to leverage it.
+- In "searchSuggestions" provide at least six combined Hebrew/English search terms or phrases derived from the uploaded case documents and AI insights.`;
 
     const aiResponse = await callOpenAI({
       messages: [
@@ -743,12 +769,16 @@ Each source should reference real or plausible peer-reviewed literature (prefer 
         question: payload.clinicalQuestion,
         sources: [],
         overallSummary: aiResponse,
+        searchSuggestions: [],
       };
     }
 
     parsed.question = parsed.question || payload.clinicalQuestion;
     parsed.sources = Array.isArray(parsed.sources) ? parsed.sources : [];
     parsed.overallSummary = parsed.overallSummary || "";
+    parsed.searchSuggestions = Array.isArray(parsed.searchSuggestions)
+      ? parsed.searchSuggestions.map((entry) => String(entry))
+      : [];
 
     res.json(parsed);
   } catch (error) {

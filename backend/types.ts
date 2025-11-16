@@ -84,6 +84,7 @@ export interface LiteratureReviewResult {
   question: string;
   sources: LiteratureSource[];
   overallSummary: string;
+  searchSuggestions?: string[];
 }
 
 export interface ApiErrorResponse {
