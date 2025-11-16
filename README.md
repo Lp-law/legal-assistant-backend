@@ -7,11 +7,13 @@ This is a full-stack web application designed to assist lawyers representing doc
 - **Secure User Authentication**: Role-based access for lawyers (users) and administrators.
 - **Case Management Dashboard**: Create, view, update, and delete cases. Admins can view cases for all users.
 - **Multi-File Upload**: Upload multiple medical and legal documents (PDF, PNG, JPG) for a case.
+- **Document Text Extraction**: Uploaded PDFs/DOCX files are processed in-memory, text is extracted, and only text + metadata is stored in PostgreSQL.
 - **AI-Powered Analysis**:
-    - **Initial Report Generation**: Gemini analyzes uploaded documents to create a detailed report including a chronological timeline, key entities, analysis of weaknesses in the plaintiff's claims, and relevant medical literature.
-    - **Comparative Analysis**: Upload a defense expert's opinion to receive an AI-generated comparative report that identifies gaps and strengthens the defense strategy.
-    - **Executive Summaries**: Generate concise, one-page summaries of full reports for quick review.
-- **External Literature Search**: The backend searches PubMed and Google Scholar in real-time to find supporting medical articles.
+    - **Initial Report Generation**: OpenAI (configurable) analyzes uploaded documents plus case focus instructions and returns a structured defense-oriented report.
+    - **Comparative Analysis**: Pick two expert opinions from the case and get an AI-generated comparison highlighting agreements, disagreements, and strategy guidance.
+    - **Executive Summaries / Copy to Clipboard**: Reports are rendered with pre-wrap formatting for quick review and export.
+- **Literature Search Panel**: Ask a focused clinical / medico-legal question and receive curated article leads with summaries and implications for the defense.
+- **Audit-Friendly Logging**: All AI calls are logged with case/user metadata (no PHI), so activity can be traced when needed.
 - **Focused Analysis**: Users can guide the AI's focus towards specific legal points like negligence, causation, or life expectancy.
 
 ## Tech Stack
@@ -26,6 +28,69 @@ This is a full-stack web application designed to assist lawyers representing doc
   - JWT for authentication
 - **AI**:
   - Google Gemini API (`gemini-2.5-pro`) for text analysis and generation.
+  - OpenAI Chat Completions (default `gpt-4o-mini`, override via env) for reports and literature reviews.
+
+---
+
+## Environment Variables
+
+Create a `.env` file inside `backend/` with:
+
+| Variable | Description |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL connection string (Render / Supabase / local). |
+| `JWT_SECRET` | Secret used for JWT signing. |
+| `FRONTEND_URL` | Allowed origin for CORS (e.g., `https://medical-assistant-qgwi.onrender.com`). |
+| `OPENAI_API_KEY` | OpenAI API key with access to GPT-4o/GPT-4.1 (required for AI features). |
+| `OPENAI_MODEL` | *(Optional)* Override default OpenAI model. |
+
+Frontend (inside `legal-assistant-frontend/.env`):
+
+```
+VITE_API_BASE_URL=http://localhost:3001
+```
+
+> When deployed, point `VITE_API_BASE_URL` to the Render backend URL.
+
+---
+
+## Database Setup
+
+- Run `npm run db:setup` from `legal-assistant-backend/` to create:
+  - `users`, `cases`, and the new `case_documents` table (with indexes).
+  - Enum types `user_role_enum` and `app_state_enum` (now including `processing`).
+- Uploaded documents are *never* stored on disk. Multer uses `memoryStorage`, text is extracted immediately (PDF via `pdf-parse`, DOCX via `mammoth`) and persisted in `case_documents.extracted_text`.
+
+Existing databases can be updated by re-running `npm run db:setup` or executing the SQL inside `backend/setup.ts`.
+
+---
+
+## Key API Endpoints
+
+All `/api/cases/*` routes require a valid `Authorization: Bearer <token>` header and enforce owner/admin access.
+
+| Method & Path | Description |
+| --- | --- |
+| `POST /api/auth/login` | Returns `{ user, token }`. |
+| `GET /api/cases` | List cases (admin sees all, user sees own). |
+| `POST /api/cases` | Create a new case with default focus options. |
+| `PUT /api/cases/:id` | Update name, focus text/options, reports, app state. |
+| `DELETE /api/cases/:id` | Delete case (owner/admin). |
+| `POST /api/cases/:id/documents` | Upload multiple PDF/DOCX files (≤10MB each). Returns metadata + preview snippets. |
+| `GET /api/cases/:id/documents` | List document metadata for the case. |
+| `GET /api/cases/:id/documents/:docId` | Fetch full extracted text. |
+| `POST /api/cases/:id/initial-report` | Build a structured defense report (uses documents + focus text). |
+| `POST /api/cases/:id/comparison-report` | Compare two expert opinions by document ID. |
+| `POST /api/cases/:id/literature-review` | Answer a clinical question with curated articles. |
+
+---
+
+## Quality & Logging
+
+- Centralized CORS configuration covers local dev (`http://localhost:5173`) and Render deployments (configure `FRONTEND_URL`).
+- AI calls log `{ caseId, user, action, duration, status }` without PHI.
+- Request typing extends `express.Request` so `req.user` is strongly typed end-to-end (no `@ts-ignore`).
+- All error responses follow `{ message, details? }` for consistent frontend handling.
 
 ---
 
@@ -47,17 +112,23 @@ You have two main paths to run this application:
 1.  Navigate to the `backend` directory: `cd backend`
 2.  Install dependencies: `npm install`
 3.  Create a `.env` file in the `backend` directory. See `backend/README.md` for the required variables.
-4.  Set up the database tables and seed initial users: `npm run db:setup`
+4.  Set up the database tables (users, cases, case_documents) and seed initial users: `npm run db:setup`
 5.  Start the backend development server: `npm run dev`
     - The server will run on `http://localhost:3001` by default.
 
 ### Frontend Setup
 
-The frontend is designed to run without a complex build step.
+The frontend is a Vite + React app with inline RTL UI.
 
-1.  You need a simple static file server. If you use VS Code, the "Live Server" extension is a great choice.
-2.  From the project's **root directory**, start your live server.
-3.  The application will be accessible (e.g., at `http://localhost:5173`) and will automatically connect to your backend running on port 3001.
+1.  `cd legal-assistant-frontend`
+2.  `npm install`
+3.  Create `.env` with `VITE_API_BASE_URL=http://localhost:3001` if you want to point to a custom backend.
+4.  `npm run dev` (default `http://localhost:5173`)
+5.  Use the UI to:
+    - Log in (seed users: `admin` / `admin123`, etc.).
+    - Create a case, toggle focus areas, add notes.
+    - Upload medical/legal documents.
+    - Generate initial reports, comparison reports, and literature searches directly from the case panel.
 
 ---
 

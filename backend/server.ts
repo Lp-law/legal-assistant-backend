@@ -1,8 +1,7 @@
 import "dotenv/config";
 import express from "express";
-import cors from "cors";
+import cors, { CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
-import pool from "./db.js"; // חשוב: לוודא שהחיבור ל-DB מיובא כאן
 
 import authRouter from "./routes/auth.js";
 import casesRouter from "./routes/cases.js";
@@ -10,47 +9,46 @@ import casesRouter from "./routes/cases.js";
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-app.use(
-  cors({
-    origin: true, // מאפשר גם localhost וגם Render
-    credentials: true,
-  })
+const defaultFrontendUrl = "https://medical-assistant-qgwi.onrender.com";
+const allowedOrigins = new Set(
+  [
+    "http://localhost:5173",
+    process.env.FRONTEND_URL,
+    defaultFrontendUrl,
+  ].filter(Boolean) as string[]
 );
+
+const corsOptions: CorsOptions = {
+  origin(origin, callback) {
+    if (!origin) {
+      return callback(null, true);
+    }
+    if (allowedOrigins.has(origin)) {
+      return callback(null, true);
+    }
+    if (process.env.NODE_ENV !== "production") {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS: Origin ${origin} is not allowed.`));
+  },
+  credentials: true,
+};
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && !allowedOrigins.has(origin) && process.env.NODE_ENV !== "production") {
+    console.warn(`CORS warning: received request from unlisted origin ${origin}`);
+  }
+  next();
+});
+
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 
 // Health check
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, message: "Backend is running" });
-});
-
-// =========================
-// ⚠️ ROUTE זמני ליצירת טבלה ⚠️
-// =========================
-// אחרי שהטבלה case_documents נוצרת — חובה למחוק!
-app.post("/api/dev/run-sql", async (req, res) => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS case_documents (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        case_id UUID NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-        original_filename TEXT NOT NULL,
-        mime_type TEXT NOT NULL,
-        size_bytes INTEGER NOT NULL,
-        extracted_text TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-    `);
-
-    res.json({
-      success: true,
-      message: "Table case_documents created successfully",
-    });
-  } catch (err: any) {
-    console.error("Error creating table:", err);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // Routes

@@ -14,7 +14,11 @@ const setupDatabase = async () => {
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'app_state_enum') THEN
-                CREATE TYPE app_state_enum AS ENUM ('idle', 'loading', 'success', 'error');
+                CREATE TYPE app_state_enum AS ENUM ('idle', 'loading', 'success', 'error', 'processing');
+            ELSIF NOT EXISTS (
+                SELECT 1 FROM pg_enum WHERE enumtypid = 'app_state_enum'::regtype AND enumlabel = 'processing'
+            ) THEN
+                ALTER TYPE app_state_enum ADD VALUE 'processing';
             END IF;
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role_enum') THEN
                 CREATE TYPE user_role_enum AS ENUM ('admin', 'user');
@@ -47,12 +51,26 @@ const setupDatabase = async () => {
             app_state app_state_enum NOT NULL DEFAULT 'idle'
         );
     `);
+
+    console.log('4. Creating case_documents table...');
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS case_documents (
+            id UUID PRIMARY KEY,
+            case_id UUID NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            original_filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            extracted_text TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
     
-    console.log('4. Creating indexes...');
+    console.log('5. Creating indexes...');
     await client.query('CREATE INDEX IF NOT EXISTS idx_cases_owner ON cases(owner);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_case_documents_case_id ON case_documents(case_id);');
 
 
-    console.log('5. Seeding initial users...');
+    console.log('6. Seeding initial users...');
     const usersToSeed = [
       { username: 'admin', password: 'admin123', role: 'admin' },
       { username: 'lior', password: 'lior123', role: 'user' },

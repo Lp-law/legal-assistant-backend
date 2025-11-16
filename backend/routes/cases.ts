@@ -1,210 +1,688 @@
-// Fix: Use explicit 'express.Request' and 'express.Response' types to avoid conflicts with global DOM types.
-// FIX: Changed import to directly use Request and Response types from express.
-import express, { Request, Response } from 'express';
-import { authMiddleware } from '../middleware/authMiddleware.js';
-import pool from '../db.js';
-import type { AppState, CaseData, FocusOptions } from '../types';
+import express, { Request, Response } from "express";
+import multer from "multer";
+import { v4 as uuidv4 } from "uuid";
+import { authMiddleware } from "../middleware/authMiddleware.js";
+import pool from "../db.js";
+import { extractTextFromBuffer, resolveDocumentType } from "../services/documentProcessor.js";
+import { callOpenAI } from "../services/aiClient.js";
+import type {
+  AppState,
+  CaseData,
+  CaseDbRow,
+  CaseDocument,
+  CaseDocumentRow,
+  ComparisonReportRequest,
+  FocusOptions,
+  JwtUserPayload,
+  LiteratureReviewRequest,
+  LiteratureReviewResult,
+} from "../types.js";
 
 const router = express.Router();
 
-// Apply the authentication middleware to all routes in this file
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 5,
+  },
+});
+
+const DOCUMENT_PREVIEW_LENGTH = 400;
+const PROMPT_DOCUMENT_CHAR_LIMIT = 6000;
+
+type CaseDocumentSummary = Omit<CaseDocument, "extractedText"> & {
+  extractedTextPreview: string | null;
+};
+
 router.use(authMiddleware);
 
-interface CaseDbRow {
-    id: string;
-    name: string;
-    created_at: string;
-    owner: string;
-    focus_options: FocusOptions;
-    focus_text: string;
-    initial_report: string | null;
-    comparison_report: string | null;
-    app_state: AppState;
+const requireUser = (req: Request, res: Response): JwtUserPayload | null => {
+  if (!req.user) {
+    res.status(401).json({ message: "Authentication required." });
+    return null;
+  }
+  return req.user;
+};
+
+const mapCaseRowToCaseData = (row: CaseDbRow): CaseData => ({
+  id: row.id,
+  name: row.name,
+  createdAt: row.created_at,
+  owner: row.owner,
+  focusOptions: row.focus_options,
+  focusText: row.focus_text,
+  initialReport: row.initial_report,
+  comparisonReport: row.comparison_report,
+  appState: row.app_state,
+});
+
+const mapDocumentRowToDocument = (row: CaseDocumentRow): CaseDocument => ({
+  id: row.id,
+  caseId: row.case_id,
+  originalFilename: row.original_filename,
+  mimeType: row.mime_type,
+  sizeBytes: row.size_bytes,
+  extractedText: row.extracted_text,
+  createdAt: row.created_at,
+});
+
+const summarizeDocument = (doc: CaseDocument): CaseDocumentSummary => ({
+  id: doc.id,
+  caseId: doc.caseId,
+  originalFilename: doc.originalFilename,
+  mimeType: doc.mimeType,
+  sizeBytes: doc.sizeBytes,
+  createdAt: doc.createdAt,
+  extractedTextPreview: doc.extractedText ? doc.extractedText.slice(0, DOCUMENT_PREVIEW_LENGTH) : null,
+});
+
+const canAccessCase = (user: JwtUserPayload, caseRow: CaseDbRow) =>
+  user.role === "admin" || caseRow.owner === user.username;
+
+const truncateForPrompt = (text: string | null | undefined, limit = PROMPT_DOCUMENT_CHAR_LIMIT) => {
+  if (!text) {
+    return "[No extracted text available]";
+  }
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}\n\n[Truncated for AI prompt]`;
+};
+
+const getCaseRow = async (caseId: string): Promise<CaseDbRow | null> => {
+  const result = await pool.query<CaseDbRow>("SELECT * FROM cases WHERE id = $1", [caseId]);
+  return result.rows[0] ?? null;
+};
+
+const getCaseDocuments = async (caseId: string): Promise<CaseDocument[]> => {
+  const result = await pool.query<CaseDocumentRow>(
+    "SELECT * FROM case_documents WHERE case_id = $1 ORDER BY created_at DESC",
+    [caseId]
+  );
+  return result.rows.map(mapDocumentRowToDocument);
+};
+
+const getCaseDocumentById = async (
+  caseId: string,
+  documentId: string
+): Promise<CaseDocument | null> => {
+  const result = await pool.query<CaseDocumentRow>(
+    "SELECT * FROM case_documents WHERE case_id = $1 AND id = $2",
+    [caseId, documentId]
+  );
+  return result.rows[0] ? mapDocumentRowToDocument(result.rows[0]) : null;
+};
+
+const setCaseAppState = async (caseId: string, state: AppState) => {
+  await pool.query("UPDATE cases SET app_state = $1 WHERE id = $2", [state, caseId]);
+};
+
+router.get("/", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  try {
+    let query = "SELECT * FROM cases ORDER BY created_at DESC";
+    const params: string[] = [];
+
+    if (user.role !== "admin") {
+      query = "SELECT * FROM cases WHERE owner = $1 ORDER BY created_at DESC";
+      params.push(user.username);
+    }
+
+    const result = await pool.query<CaseDbRow>(query, params);
+    const cases = result.rows.map(mapCaseRowToCaseData);
+    res.json(cases);
+  } catch (error) {
+    console.error("Error fetching cases:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.get("/:id", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id } = req.params;
+
+  try {
+    const caseRow = await getCaseRow(id);
+
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to view this case." });
+    }
+
+    res.json(mapCaseRowToCaseData(caseRow));
+  } catch (error) {
+    console.error("Error fetching case by id:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.post("/", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { name } = req.body;
+
+  if (!name || typeof name !== "string") {
+    return res.status(400).json({ message: "Case name is required and must be a string." });
+  }
+
+  try {
+    const defaultFocusOptions: FocusOptions = {
+      negligence: false,
+      causation: false,
+      lifeExpectancy: false,
+    };
+
+    const result = await pool.query<CaseDbRow>(
+      `
+        INSERT INTO cases (name, owner, focus_options, focus_text, app_state)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING *;
+      `,
+      [name.trim(), user.username, JSON.stringify(defaultFocusOptions), "", "idle"]
+    );
+
+    res.status(201).json(mapCaseRowToCaseData(result.rows[0]));
+  } catch (error) {
+    console.error("Error creating case:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.put("/:id", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id } = req.params;
+  const caseUpdates: Partial<CaseData> = req.body;
+
+  try {
+    const currentResult = await pool.query<CaseDbRow>("SELECT * FROM cases WHERE id = $1", [id]);
+
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    const currentCase = currentResult.rows[0];
+
+    if (!canAccessCase(user, currentCase)) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to update this case." });
+    }
+
+    const result = await pool.query<CaseDbRow>(
+      `
+        UPDATE cases
+        SET
+          name = $1,
+          focus_options = $2,
+          focus_text = $3,
+          initial_report = $4,
+          comparison_report = $5,
+          app_state = $6
+        WHERE id = $7
+        RETURNING *;
+      `,
+      [
+        caseUpdates.name ?? currentCase.name,
+        JSON.stringify(caseUpdates.focusOptions ?? currentCase.focus_options),
+        caseUpdates.focusText ?? currentCase.focus_text,
+        caseUpdates.initialReport ?? currentCase.initial_report,
+        caseUpdates.comparisonReport ?? currentCase.comparison_report,
+        caseUpdates.appState ?? currentCase.app_state,
+        id,
+      ]
+    );
+
+    res.json(mapCaseRowToCaseData(result.rows[0]));
+  } catch (error) {
+    console.error("Error updating case:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.delete("/:id", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id } = req.params;
+
+  try {
+    const existing = await pool.query<{ owner: string }>("SELECT owner FROM cases WHERE id = $1", [id]);
+
+    if (existing.rows.length === 0) {
+      return res.status(204).send();
+    }
+
+    const caseOwner = existing.rows[0];
+
+    if (caseOwner.owner !== user.username && user.role !== "admin") {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to delete this case." });
+    }
+
+    await pool.query("DELETE FROM cases WHERE id = $1", [id]);
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting case:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.post("/:id/documents", upload.array("files"), async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id } = req.params;
+
+  try {
+    const caseRow = await getCaseRow(id);
+
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to upload documents." });
+    }
+
+    const files = req.files as Express.Multer.File[] | undefined;
+
+    if (!files || files.length === 0) {
+      return res.status(400).json({ message: "No files were uploaded." });
+    }
+
+    const insertedDocuments: CaseDocument[] = [];
+    const errors: string[] = [];
+
+    for (const file of files) {
+      try {
+        const docType = resolveDocumentType(file);
+        if (!docType) {
+          errors.push(`${file.originalname}: Unsupported file type. Upload PDF or DOCX files only.`);
+          continue;
+        }
+
+        const extractedText = await extractTextFromBuffer(file);
+
+        const insertResult = await pool.query<CaseDocumentRow>(
+          `
+            INSERT INTO case_documents (
+              id,
+              case_id,
+              original_filename,
+              mime_type,
+              size_bytes,
+              extracted_text
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *;
+          `,
+          [uuidv4(), id, file.originalname, file.mimetype, file.size, extractedText]
+        );
+
+        insertedDocuments.push(mapDocumentRowToDocument(insertResult.rows[0]));
+      } catch (error) {
+        console.error("Error processing uploaded document:", error);
+        errors.push(`${file.originalname}: Failed to process file.`);
+      }
+    }
+
+    const statusCode = insertedDocuments.length > 0 ? 201 : 400;
+    res.status(statusCode).json({
+      documents: insertedDocuments.map(summarizeDocument),
+      errors: errors.length ? errors : undefined,
+    });
+  } catch (error) {
+    console.error("Error uploading documents:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.get("/:id/documents", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id } = req.params;
+
+  try {
+    const caseRow = await getCaseRow(id);
+
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to view documents for this case." });
+    }
+
+    const documents = await getCaseDocuments(id);
+    res.json(documents.map(summarizeDocument));
+  } catch (error) {
+    console.error("Error fetching case documents:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.get("/:id/documents/:docId", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id, docId } = req.params;
+
+  try {
+    const caseRow = await getCaseRow(id);
+
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to view documents for this case." });
+    }
+
+    const document = await getCaseDocumentById(id, docId);
+
+    if (!document) {
+      return res.status(404).json({ message: "Document not found" });
+    }
+
+    res.json(document);
+  } catch (error) {
+    console.error("Error fetching document:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.post("/:id/initial-report", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id } = req.params;
+
+  try {
+    const caseRow = await getCaseRow(id);
+
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: no access to generate report." });
+    }
+
+    await setCaseAppState(id, "processing");
+    const documents = await getCaseDocuments(id);
+
+    const documentsContext = documents.length
+      ? documents
+          .map(
+            (doc, index) =>
+              `Document ${index + 1}: ${doc.originalFilename}\nUploaded at: ${new Date(doc.createdAt).toISOString()}\nContent:\n${truncateForPrompt(
+                doc.extractedText
+              )}`
+          )
+          .join("\n\n")
+      : "No supporting documents were uploaded.";
+
+    const focusSummary =
+      Object.entries(caseRow.focus_options)
+        .filter(([, enabled]) => enabled)
+        .map(([key]) => key)
+        .join(", ") || "None selected";
+
+    const prompt = `
+You are an experienced medical-legal analyst. Review the malpractice case information and produce a structured English report for defense counsel.
+
+Case Name: ${caseRow.name}
+Owner: ${caseRow.owner}
+Focus Options Selected: ${focusSummary}
+Focus Notes:
+${caseRow.focus_text || "No additional focus text provided."}
+
+Supporting Documents:
+${documentsContext}
+
+Write the report using the following outline:
+1. Title: "Preliminary Analysis of Plaintiff’s Medical Claims"
+2. Introductory paragraph describing the purpose of the document.
+3. Section A - Case Summary and Key Plaintiff Allegations.
+4. Section B - Potential Weaknesses (with sub-sections for negligence, causation, damages/life expectancy).
+5. Section C - Relevant Medical Literature for the Defense (list concrete article leads with journal + year + brief relevance).
+6. Section D - Practical Guidance and Focal Points for the Defense Expert.
+7. Section E - Missing Information and Recommended Next Steps.
+
+Tone: neutral, analytical, professional, no legal advice.`;
+
+    const reportText = await callOpenAI({
+      messages: [
+        { role: "system", content: "You are a meticulous medical-legal analyst supporting defense counsel." },
+        { role: "user", content: prompt },
+      ],
+      maxTokens: 2200,
+      metadata: { caseId: id, user, action: "initial-report" },
+    });
+
+    const updateResult = await pool.query<CaseDbRow>(
+      `
+        UPDATE cases
+        SET initial_report = $1, app_state = $2
+        WHERE id = $3
+        RETURNING *;
+      `,
+      [reportText, "idle", id]
+    );
+
+    return res.json({
+      id: updateResult.rows[0].id,
+      initialReport: updateResult.rows[0].initial_report,
+    });
+  } catch (error) {
+    console.error("AI report error:", error);
+    await setCaseAppState(id, "error");
+    return res
+      .status(500)
+      .json({ message: "Failed to generate initial report", details: error instanceof Error ? error.message : undefined });
+  }
+});
+
+router.post("/:id/comparison-report", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id } = req.params;
+  const payload: ComparisonReportRequest = req.body;
+
+  if (!payload.reportAId || !payload.reportBId) {
+    return res.status(400).json({ message: "reportAId and reportBId are required." });
+  }
+
+  try {
+    const caseRow = await getCaseRow(id);
+
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: no access to generate comparison report." });
+    }
+
+    await setCaseAppState(id, "processing");
+
+    const docA = await getCaseDocumentById(id, payload.reportAId);
+    const docB = await getCaseDocumentById(id, payload.reportBId);
+
+    if (!docA || !docB) {
+      return res.status(404).json({ message: "One or both documents were not found for this case." });
+    }
+
+    const docAText = payload.reportAText ?? docA.extractedText;
+    const docBText = payload.reportBText ?? docB.extractedText;
+
+    if (!docAText || !docBText) {
+      return res.status(400).json({ message: "Selected documents do not contain extracted text yet." });
+    }
+
+    const prompt = `
+Compare the following two expert medical-legal opinions related to the same malpractice case.
+
+Case Name: ${caseRow.name}
+Focus Notes: ${caseRow.focus_text || "None"}
+
+Opinion A (${docA.originalFilename}):
+${truncateForPrompt(docAText)}
+
+Opinion B (${docB.originalFilename}):
+${truncateForPrompt(docBText)}
+
+Produce an English report with:
+1. Brief synopsis of each opinion.
+2. Agreements and disagreements across: diagnosis, causation, standard of care, prognosis/life expectancy.
+3. Assessment of evidentiary strength (which opinion cites stronger data and why).
+4. Actionable recommendations for defense counsel (e.g., data to obtain, questions for experts, literature to consult).
+Use headings, bullet points, and a neutral professional tone.`;
+
+    const comparisonText = await callOpenAI({
+      messages: [
+        { role: "system", content: "You are an impartial medical-legal analyst comparing expert opinions." },
+        { role: "user", content: prompt },
+      ],
+      maxTokens: 1600,
+      metadata: { caseId: id, user, action: "comparison-report" },
+    });
+
+    const updateResult = await pool.query<CaseDbRow>(
+      `
+        UPDATE cases
+        SET comparison_report = $1, app_state = $2
+        WHERE id = $3
+        RETURNING *;
+      `,
+      [comparisonText, "idle", id]
+    );
+
+    return res.json({
+      id: updateResult.rows[0].id,
+      comparisonReport: updateResult.rows[0].comparison_report,
+    });
+  } catch (error) {
+    console.error("Comparison report error:", error);
+    await setCaseAppState(id, "error");
+    return res
+      .status(500)
+      .json({ message: "Failed to generate comparison report", details: error instanceof Error ? error.message : undefined });
+  }
+});
+
+router.post("/:id/literature-review", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id } = req.params;
+  const payload: LiteratureReviewRequest = req.body;
+
+  if (!payload.clinicalQuestion || typeof payload.clinicalQuestion !== "string") {
+    return res.status(400).json({ message: "clinicalQuestion is required." });
+  }
+
+  try {
+    const caseRow = await getCaseRow(id);
+
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: no access to run literature review." });
+    }
+
+    const prompt = `
+You are assisting defense counsel in a medical malpractice case.
+Case Name: ${caseRow.name}
+Clinical Question: ${payload.clinicalQuestion}
+Focus Options: ${JSON.stringify(caseRow.focus_options)}
+Focus Notes: ${caseRow.focus_text || "None"}
+
+Provide a JSON response with the following structure:
+{
+  "question": "...",
+  "sources": [
+    {
+      "title": "",
+      "journal": "",
+      "year": 2023,
+      "url": "",
+      "summary": "",
+      "implication": ""
+    }
+  ],
+  "overallSummary": ""
 }
 
-// GET /api/cases - Get cases based on user role
-// FIX: Use explicit Request and Response types from express to fix method errors like .json and .status.
-// FIX: Changed types from express.Request to Request.
-router.get('/', async (req: Request, res: Response) => {
-    // @ts-ignore - 'user' is added by authMiddleware
-    const { username, role } = req.user;
+Each source should reference real or plausible peer-reviewed literature (prefer PubMed-style references) and explain how the findings help the defense.`;
 
+    const aiResponse = await callOpenAI({
+      messages: [
+        { role: "system", content: "You are a medical librarian creating concise evidence summaries for legal teams." },
+        { role: "user", content: prompt },
+      ],
+      maxTokens: 1400,
+      responseFormat: { type: "json_object" },
+      metadata: { caseId: id, user, action: "literature-review" },
+    });
+
+    let parsed: LiteratureReviewResult;
     try {
-        let query;
-        const params: string[] = [];
-        if (role === 'admin') {
-            query = 'SELECT * FROM cases ORDER BY created_at DESC';
-        } else {
-            query = 'SELECT * FROM cases WHERE owner = $1 ORDER BY created_at DESC';
-            params.push(username);
-        }
-        const result = await pool.query<CaseDbRow>(query, params);
-        // Convert snake_case from DB to camelCase for the frontend
-        const cases: CaseData[] = result.rows.map(row => ({
-            id: row.id,
-            name: row.name,
-            createdAt: row.created_at,
-            owner: row.owner,
-            focusOptions: row.focus_options,
-            focusText: row.focus_text,
-            initialReport: row.initial_report,
-            comparisonReport: row.comparison_report,
-            appState: row.app_state
-        }));
-
-        res.json(cases);
-    } catch (error) {
-        console.error('Error fetching cases:', error);
-        res.status(500).json({ message: 'Internal server error' });
+      parsed = JSON.parse(aiResponse) as LiteratureReviewResult;
+    } catch (parseError) {
+      console.warn("Failed to parse AI JSON response, returning raw text.");
+      parsed = {
+        question: payload.clinicalQuestion,
+        sources: [],
+        overallSummary: aiResponse,
+      };
     }
+
+    parsed.question = parsed.question || payload.clinicalQuestion;
+    parsed.sources = Array.isArray(parsed.sources) ? parsed.sources : [];
+    parsed.overallSummary = parsed.overallSummary || "";
+
+    res.json(parsed);
+  } catch (error) {
+    console.error("Literature review error:", error);
+    res
+      .status(500)
+      .json({ message: "Failed to generate literature review", details: error instanceof Error ? error.message : undefined });
+  }
 });
-
-// POST /api/cases - Create a new case
-// FIX: Use explicit Request and Response types from express to fix property errors like .body and .status.
-// FIX: Changed types from express.Request to Request.
-router.post('/', async (req: Request, res: Response) => {
-    // @ts-ignore - 'user' is added by authMiddleware
-    const { username } = req.user;
-    const { name } = req.body;
-
-    if (!name || typeof name !== 'string') {
-        return res.status(400).json({ message: 'Case name is required and must be a string.' });
-    }
-
-    try {
-        const query = `
-            INSERT INTO cases (name, owner, focus_options, focus_text, app_state)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING *;
-        `;
-        const focusOptions = { negligence: false, causation: false, lifeExpectancy: false };
-        const values = [name.trim(), username, JSON.stringify(focusOptions), '', 'idle'];
-        
-        const result = await pool.query<CaseDbRow>(query, values);
-        const newCaseRow = result.rows[0];
-        
-        const newCase: CaseData = {
-            id: newCaseRow.id,
-            name: newCaseRow.name,
-            createdAt: newCaseRow.created_at,
-            owner: newCaseRow.owner,
-            focusOptions: newCaseRow.focus_options,
-            focusText: newCaseRow.focus_text,
-            initialReport: newCaseRow.initial_report,
-            comparisonReport: newCaseRow.comparison_report,
-            appState: newCaseRow.app_state,
-        };
-        
-        res.status(201).json(newCase);
-
-    } catch (error) {
-        console.error('Error creating case:', error);
-        res.status(500).json({ message: 'Internal server error' });
-    }
-});
-
-// PUT /api/cases/:id - Update an existing case
-// FIX: Use explicit Request and Response types from express to fix property errors like .params, .body, and .status.
-// FIX: Changed types from express.Request to Request.
-router.put('/:id', async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const caseUpdates: Partial<CaseData> = req.body;
-    // @ts-ignore - 'user' is added by authMiddleware
-    const { username, role } = req.user;
-
-    try {
-        const findQuery = 'SELECT owner FROM cases WHERE id = $1';
-        const findResult = await pool.query<{ owner: string }>(findQuery, [id]);
-
-        if (findResult.rows.length === 0) {
-            return res.status(404).json({ message: 'Case not found' });
-        }
-        
-        const originalCase = findResult.rows[0];
-        if (originalCase.owner !== username && role !== 'admin') {
-            return res.status(403).json({ message: 'Forbidden: You do not have permission to update this case.' });
-        }
-
-        const updateQuery = `
-            UPDATE cases
-            SET 
-                name = $1, 
-                focus_options = $2, 
-                focus_text = $3, 
-                initial_report = $4, 
-                comparison_report = $5, 
-                app_state = $6
-            WHERE id = $7
-            RETURNING *;
-        `;
-        
-        // Fetch current case to merge with updates
-        const currentCaseResult = await pool.query<CaseDbRow>('SELECT * FROM cases WHERE id = $1', [id]);
-        const currentCase = currentCaseResult.rows[0];
-
-        const values = [
-            caseUpdates.name ?? currentCase.name,
-            caseUpdates.focusOptions ?? currentCase.focus_options,
-            caseUpdates.focusText ?? currentCase.focus_text,
-            caseUpdates.initialReport ?? currentCase.initial_report,
-            caseUpdates.comparisonReport ?? currentCase.comparison_report,
-            caseUpdates.appState ?? currentCase.app_state,
-            id
-        ];
-        
-        const result = await pool.query<CaseDbRow>(updateQuery, values);
-        const updatedCaseRow = result.rows[0];
-
-        const updatedCase: CaseData = {
-             id: updatedCaseRow.id,
-            name: updatedCaseRow.name,
-            createdAt: updatedCaseRow.created_at,
-            owner: updatedCaseRow.owner,
-            focusOptions: updatedCaseRow.focus_options,
-            focusText: updatedCaseRow.focus_text,
-            initialReport: updatedCaseRow.initial_report,
-            comparisonReport: updatedCaseRow.comparison_report,
-            appState: updatedCaseRow.app_state,
-        };
-        
-        res.json(updatedCase);
-
-    } catch (error) {
-        console.error('Error updating case:', error);
-        res.status(500).json({ message: 'Internal server error' });
-    }
-});
-
-// DELETE /api/cases/:id - Delete a case
-// FIX: Use explicit Request and Response types from express to fix property errors like .params and .status.
-// FIX: Changed types from express.Request to Request.
-router.delete('/:id', async (req: Request, res: Response) => {
-    const { id } = req.params;
-    // @ts-ignore - 'user' is added by authMiddleware
-    const { username, role } = req.user;
-    
-    try {
-        const findQuery = 'SELECT owner FROM cases WHERE id = $1';
-        const findResult = await pool.query<{ owner: string }>(findQuery, [id]);
-
-        if (findResult.rows.length === 0) {
-            // If it doesn't exist, it's already "deleted". No need to error.
-            return res.status(204).send();
-        }
-
-        const caseToDelete = findResult.rows[0];
-        if (caseToDelete.owner !== username && role !== 'admin') {
-            return res.status(403).json({ message: 'Forbidden: You do not have permission to delete this case.' });
-        }
-
-        await pool.query('DELETE FROM cases WHERE id = $1', [id]);
-        res.status(204).send();
-
-    } catch (error) {
-        console.error('Error deleting case:', error);
-        res.status(500).json({ message: 'Internal server error' });
-    }
-});
-
 
 export default router;
