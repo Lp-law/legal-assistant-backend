@@ -43,6 +43,8 @@ Create a `.env` file inside `backend/` with:
 | `FRONTEND_URL` | Allowed origin for CORS (e.g., `https://medical-assistant-qgwi.onrender.com`). |
 | `OPENAI_API_KEY` | OpenAI API key with access to GPT-4o/GPT-4.1 (required for AI features). |
 | `OPENAI_MODEL` | *(Optional)* Override default OpenAI model. |
+| `MAX_UPLOAD_SIZE_MB` | *(Optional)* Max size per uploaded document in MB (default `25`). |
+| `MAX_UPLOAD_FILES` | *(Optional)* Max number of documents per request (default `5`). |
 
 Frontend (inside `legal-assistant-frontend/.env`):
 
@@ -76,7 +78,7 @@ All `/api/cases/*` routes require a valid `Authorization: Bearer <token>` header
 | `POST /api/cases` | Create a new case with default focus options. |
 | `PUT /api/cases/:id` | Update name, focus text/options, reports, app state. |
 | `DELETE /api/cases/:id` | Delete case (owner/admin). |
-| `POST /api/cases/:id/documents` | Upload multiple PDF/DOCX files (≤10MB each). Returns metadata + preview snippets. |
+| `POST /api/cases/:id/documents` | Upload multiple PDF/DOCX files (≤`MAX_UPLOAD_SIZE_MB` MB each, default 25MB). Returns metadata + preview snippets. |
 | `GET /api/cases/:id/documents` | List document metadata for the case. |
 | `GET /api/cases/:id/documents/:docId` | Fetch full extracted text. |
 | `POST /api/cases/:id/initial-report` | Build a structured defense report (uses documents + focus text). |

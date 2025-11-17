@@ -23,11 +23,27 @@ import type {
 
 const router = express.Router();
 
+const DEFAULT_MAX_UPLOAD_SIZE_MB = 25;
+const DEFAULT_MAX_UPLOAD_FILES = 5;
+
+const configuredMaxUploadSizeMb = Number(process.env.MAX_UPLOAD_SIZE_MB ?? `${DEFAULT_MAX_UPLOAD_SIZE_MB}`);
+const configuredMaxUploadFiles = Number(process.env.MAX_UPLOAD_FILES ?? `${DEFAULT_MAX_UPLOAD_FILES}`);
+
+const MAX_UPLOAD_SIZE_MB =
+  Number.isFinite(configuredMaxUploadSizeMb) && configuredMaxUploadSizeMb > 0
+    ? configuredMaxUploadSizeMb
+    : DEFAULT_MAX_UPLOAD_SIZE_MB;
+
+const MAX_UPLOAD_FILES =
+  Number.isFinite(configuredMaxUploadFiles) && configuredMaxUploadFiles > 0
+    ? configuredMaxUploadFiles
+    : DEFAULT_MAX_UPLOAD_FILES;
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024,
-    files: 5,
+    fileSize: MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+    files: MAX_UPLOAD_FILES,
   },
 });
 const uploadDocumentsMiddleware = upload.array("files");
@@ -347,7 +363,9 @@ router.post("/:id/documents", (req: Request, res: Response) => {
     if (middlewareError) {
       if (middlewareError instanceof MulterError) {
         if (middlewareError.code === "LIMIT_FILE_SIZE") {
-          return res.status(400).json({ message: "הקובץ גדול מדי (עד 10MB לקובץ)." });
+          return res
+            .status(400)
+            .json({ message: `הקובץ גדול מדי (עד ${MAX_UPLOAD_SIZE_MB}MB לקובץ).` });
         }
         return res.status(400).json({ message: `שגיאת העלאה: ${middlewareError.message}` });
       }
@@ -562,7 +580,7 @@ router.get("/:id/activity", async (req: Request, res: Response) => {
     const events: CaseActivityEvent[] = [
       {
         id: caseRow.id,
-        type: "case-created",
+        type: "case-created" as const,
         title: "התיק נוצר",
         description: `נוצר על ידי ${caseRow.owner}`,
         timestamp: caseRow.created_at,
@@ -570,7 +588,7 @@ router.get("/:id/activity", async (req: Request, res: Response) => {
       },
       ...documents.map((doc) => ({
         id: doc.id,
-        type: "document-uploaded",
+        type: "document-uploaded" as const,
         title: doc.originalFilename,
         description: `מסמך בגודל ${formatFileSize(doc.sizeBytes)}`,
         timestamp: doc.createdAt,
