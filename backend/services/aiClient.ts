@@ -17,7 +17,7 @@ interface CallOpenAIOptions {
   metadata?: {
     caseId: string;
     user: JwtUserPayload;
-    action: "initial-report" | "comparison-report" | "literature-review";
+    action: "initial-report" | "comparison-report" | "literature-review" | "claim-extraction";
   };
 }
 
