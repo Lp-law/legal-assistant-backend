@@ -912,7 +912,7 @@ router.post("/:id/initial-report", async (req: Request, res: Response) => {
         {
           role: "system",
           content:
-            "You are a senior medical expert witness who writes exhaustive Hebrew analyses of plaintiff expert opinions. Remain strictly medical; avoid legal terminology.",
+            "You are a senior medical expert witness who writes exhaustive Hebrew analyses of plaintiff expert opinions. Remain strictly medical; avoid legal terminology. Treat all uploaded documents and source code as confidential work-product and do not use them for training, fine-tuning, or improving any AI system.",
         },
         { role: "user", content: prompt },
       ],
@@ -1082,7 +1082,7 @@ ${comparisonUnresolvedText}
         {
           role: "system",
           content:
-            "You are a senior medical expert who compares expert opinions entirely from a clinical perspective. Always answer in Hebrew and avoid legal commentary.",
+            "You are a senior medical expert who compares expert opinions entirely from a clinical perspective. Always answer in Hebrew and avoid legal commentary. Treat all uploaded documents and source code as confidential work-product and do not use them for training, fine-tuning, or improving any AI system.",
         },
         { role: "user", content: prompt },
       ],
@@ -1176,7 +1176,11 @@ Guidelines:
 
     const aiResponse = await callOpenAI({
       messages: [
-        { role: "system", content: "You are a medical librarian creating concise evidence summaries for legal teams." },
+        {
+          role: "system",
+          content:
+            "You are a medical librarian creating concise evidence summaries for legal teams. Treat all uploaded documents and source code as confidential work-product and do not use them for training, fine-tuning, or improving any AI system.",
+        },
         { role: "user", content: prompt },
       ],
       maxTokens: 1400,
