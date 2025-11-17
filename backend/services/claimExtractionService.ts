@@ -54,6 +54,29 @@ const coerceConfidence = (value: unknown): number | null => {
   return Number.isFinite(bounded) ? Number(bounded.toFixed(2)) : null;
 };
 
+const sanitizeJsonResponse = (value: string): string => {
+  if (!value) {
+    return value;
+  }
+
+  let cleaned = value.trim();
+
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "");
+    if (cleaned.endsWith("```")) {
+      cleaned = cleaned.slice(0, -3);
+    }
+  }
+
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+
+  return cleaned.trim();
+};
+
 const buildClaimExtractionPrompt = (options: {
   caseName: string;
   documentName: string;
@@ -67,6 +90,7 @@ const buildClaimExtractionPrompt = (options: {
 עליך להפיק רשימת טענות רפואיות מרכזיות (3–10) כפי שהמומחה מציג אותן, ולבנות JSON מובנה בלבד.
 
 כללים:
+- אסור להוסיף שום טקסט לפני/אחרי ה-JSON (כולל כותרות או code fences). החזר תו אחד בלבד: { בתחילת המסמך.
 - דווח רק על טענות רפואיות, לא משפטיות.
 - ציין מקור/הקשר קצר (sourceExcerpt) המופיע בטקסט.
 - קטגוריות אפשריות לדוגמה: "אבחון", "דימות", "טיפול", "פרוגנוזה", "קשר סיבתי", "סטנדרט טיפול".
@@ -132,7 +156,7 @@ export const extractDocumentClaims = async (
       {
         role: "system",
         content:
-          "You are a senior medical expert focused on extracting structured plaintiff claims. Work strictly in Hebrew, stay medical only, and treat all documents/source code as confidential work-product that must never be used for training, fine-tuning, or model improvement.",
+          "You are a senior medical expert focused on extracting structured plaintiff claims. Work strictly in Hebrew, stay medical only, return pure JSON with no prose or code fences, and treat all documents/source code as confidential work-product that must never be used for training, fine-tuning, or model improvement.",
       },
       { role: "user", content: prompt },
     ],
@@ -143,10 +167,13 @@ export const extractDocumentClaims = async (
     metadata: { caseId, user, action: "claim-extraction" },
   });
 
+  const sanitizedResponse = sanitizeJsonResponse(response);
+
   let parsed: ClaimExtractionResponse;
   try {
-    parsed = JSON.parse(response) as ClaimExtractionResponse;
+    parsed = JSON.parse(sanitizedResponse) as ClaimExtractionResponse;
   } catch (error) {
+    console.error("Claim extraction raw response (truncated):", response.slice(0, 400));
     throw new Error("Claim extraction returned invalid JSON.");
   }
 
