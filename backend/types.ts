@@ -60,6 +60,36 @@ export interface CaseDocument {
   createdAt: string;
 }
 
+export interface DocumentClaimRow {
+  id: string;
+  case_id: string;
+  document_id: string;
+  sort_index: number;
+  claim_title: string;
+  claim_summary: string;
+  category: string;
+  confidence: number | null;
+  source_excerpt: string | null;
+  recommendation: string | null;
+  tags: string[] | null;
+  created_at: string;
+}
+
+export interface DocumentClaim {
+  id: string;
+  caseId: string;
+  documentId: string;
+  orderIndex: number;
+  claimTitle: string;
+  claimSummary: string;
+  category: string;
+  confidence: number | null;
+  sourceExcerpt: string | null;
+  recommendation: string | null;
+  tags: string[];
+  createdAt: string;
+}
+
 export interface ComparisonReportRequest {
   reportAId?: string;
   reportBId?: string;

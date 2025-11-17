@@ -11,6 +11,7 @@ import {
   type CitationCandidate,
   type ResolvedLiteratureItem,
 } from "../services/medicalLiteratureService.js";
+import { extractDocumentClaims } from "../services/claimExtractionService.js";
 import type {
   AiUsageLogRow,
   AppState,
@@ -20,6 +21,8 @@ import type {
   CaseDbRow,
   CaseDocument,
   CaseDocumentRow,
+  DocumentClaim,
+  DocumentClaimRow,
   ComparisonReportRequest,
   FocusOptions,
   JwtUserPayload,
@@ -66,6 +69,7 @@ const DEFAULT_MAX_REFERENCES_PER_REPORT = 10;
 const DEFAULT_INITIAL_REPORT_TOKENS = 2400;
 const DEFAULT_COMPARISON_REPORT_TOKENS = 2000;
 const DEFAULT_MEDICAL_REPORT_TEMPERATURE = 0.25;
+const DEFAULT_CLAIM_EXTRACTION_TOKENS = 1200;
 
 const configuredMaxReferencesPerDoc = Number(process.env.MAX_REFERENCES_PER_DOCUMENT ?? `${DEFAULT_MAX_REFERENCES_PER_DOCUMENT}`);
 const configuredMaxReferencesPerReport = Number(process.env.MAX_REFERENCES_PER_REPORT ?? `${DEFAULT_MAX_REFERENCES_PER_REPORT}`);
@@ -96,6 +100,12 @@ const MEDICAL_REPORT_TEMPERATURE =
     ? configuredTemperature
     : DEFAULT_MEDICAL_REPORT_TEMPERATURE;
 const MEDICAL_REPORT_DEPTH = (process.env.MEDICAL_REPORT_DEPTH ?? "deep").toLowerCase();
+const CLAIM_EXTRACTION_MODEL = process.env.CLAIM_EXTRACTION_MODEL || MEDICAL_REPORT_MODEL;
+const configuredClaimTokens = Number(process.env.CLAIM_EXTRACTION_MAX_TOKENS ?? `${DEFAULT_CLAIM_EXTRACTION_TOKENS}`);
+const CLAIM_EXTRACTION_MAX_TOKENS =
+  Number.isFinite(configuredClaimTokens) && configuredClaimTokens > 0
+    ? configuredClaimTokens
+    : DEFAULT_CLAIM_EXTRACTION_TOKENS;
 
 const garbledFilenamePattern = /[ÃÂÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/;
 
@@ -114,6 +124,16 @@ const normalizeFilename = (value: string): string => {
 type CaseDocumentSummary = Omit<CaseDocument, "extractedText"> & {
   extractedTextPreview: string | null;
 };
+
+interface NewDocumentClaim {
+  claimTitle: string;
+  claimSummary: string;
+  category: string;
+  confidence: number | null;
+  sourceExcerpt: string | null;
+  recommendation: string | null;
+  tags: string[];
+}
 
 router.use(authMiddleware);
 
@@ -156,6 +176,100 @@ const summarizeDocument = (doc: CaseDocument): CaseDocumentSummary => ({
   createdAt: doc.createdAt,
   extractedTextPreview: doc.extractedText ? doc.extractedText.slice(0, DOCUMENT_PREVIEW_LENGTH) : null,
 });
+
+const mapClaimRowToClaim = (row: DocumentClaimRow): DocumentClaim => ({
+  id: row.id,
+  caseId: row.case_id,
+  documentId: row.document_id,
+  orderIndex: row.sort_index ?? 0,
+  claimTitle: row.claim_title,
+  claimSummary: row.claim_summary,
+  category: row.category,
+  confidence: row.confidence,
+  sourceExcerpt: row.source_excerpt,
+  recommendation: row.recommendation,
+  tags: row.tags ?? [],
+  createdAt: row.created_at,
+});
+
+const getDocumentClaims = async (documentId: string): Promise<DocumentClaim[]> => {
+  const result = await pool.query<DocumentClaimRow>(
+    `
+      SELECT *
+      FROM case_document_claims
+      WHERE document_id = $1
+      ORDER BY sort_index ASC, created_at ASC;
+    `,
+    [documentId]
+  );
+  return result.rows.map(mapClaimRowToClaim);
+};
+
+const replaceDocumentClaims = async (
+  caseId: string,
+  documentId: string,
+  claims: NewDocumentClaim[]
+): Promise<DocumentClaim[]> => {
+  await pool.query("DELETE FROM case_document_claims WHERE document_id = $1", [documentId]);
+
+  if (!claims.length) {
+    return [];
+  }
+
+  const values: Array<string | number | string[] | null> = [];
+  const valueClauses: string[] = [];
+
+  claims.forEach((claim, index) => {
+    const baseIndex = values.length + 3;
+    valueClauses.push(
+      `(
+        gen_random_uuid(),
+        $1,
+        $2,
+        $${baseIndex},
+        $${baseIndex + 1},
+        $${baseIndex + 2},
+        $${baseIndex + 3},
+        $${baseIndex + 4},
+        $${baseIndex + 5},
+        $${baseIndex + 6},
+        $${baseIndex + 7}
+      )`
+    );
+    values.push(
+      index,
+      claim.claimTitle,
+      claim.claimSummary,
+      claim.category,
+      claim.confidence,
+      claim.sourceExcerpt,
+      claim.recommendation,
+      claim.tags
+    );
+  });
+
+  const insertQuery = `
+    INSERT INTO case_document_claims (
+      id,
+      case_id,
+      document_id,
+      sort_index,
+      claim_title,
+      claim_summary,
+      category,
+      confidence,
+      source_excerpt,
+      recommendation,
+      tags
+    )
+    VALUES
+      ${valueClauses.join(", ")}
+    RETURNING *;
+  `;
+
+  const result = await pool.query<DocumentClaimRow>(insertQuery, [caseId, documentId, ...values]);
+  return result.rows.map(mapClaimRowToClaim);
+};
 
 const canAccessCase = (user: JwtUserPayload, caseRow: CaseDbRow) =>
   user.role === "admin" || caseRow.owner === user.username;
@@ -384,6 +498,7 @@ const mapAiLogToEvent = (log: AiUsageLogRow): CaseActivityEvent => {
     "initial-report": 'דו"ח ראשוני',
     "comparison-report": 'דו"ח השוואתי',
     "literature-review": "חיפוש ספרות",
+    "claim-extraction": "חילוץ טענות",
   };
 
   const actionLabel = actionLabels[log.action] ?? log.action;
@@ -724,6 +839,103 @@ router.get("/:id/documents/:docId", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Error fetching document:", error);
     res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+router.get("/:id/documents/:docId/claims", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id, docId } = req.params;
+
+  try {
+    const caseRow = await getCaseRow(id);
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to view documents for this case." });
+    }
+
+    const document = await getCaseDocumentById(id, docId);
+    if (!document) {
+      return res.status(404).json({ message: "Document not found" });
+    }
+
+    const claims = await getDocumentClaims(docId);
+    return res.json(claims);
+  } catch (error) {
+    console.error("Error fetching document claims:", error);
+    return res.status(500).json({ message: "Failed to load claims for document." });
+  }
+});
+
+router.post("/:id/documents/:docId/claims/extract", async (req: Request, res: Response) => {
+  const user = requireUser(req, res);
+  if (!user) {
+    return;
+  }
+
+  const { id, docId } = req.params;
+
+  try {
+    const caseRow = await getCaseRow(id);
+    if (!caseRow) {
+      return res.status(404).json({ message: "Case not found" });
+    }
+
+    if (!canAccessCase(user, caseRow)) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to extract claims for this case." });
+    }
+
+    const document = await getCaseDocumentById(id, docId);
+    if (!document) {
+      return res.status(404).json({ message: "Document not found" });
+    }
+
+    if (!document.extractedText) {
+      return res.status(400).json({ message: "Document text is not available yet. Please try again later." });
+    }
+
+    const focusSummary = describeFocusOptions(caseRow.focus_options);
+    const focusNarrative = caseRow.focus_text?.trim() ? caseRow.focus_text.trim() : "לא נמסר טקסט פוקוס.";
+
+    const truncatedText = truncateForPrompt(document.extractedText);
+
+    const extractedClaims = await extractDocumentClaims({
+      caseId: id,
+      caseName: caseRow.name,
+      documentId: docId,
+      documentName: document.originalFilename,
+      documentText: truncatedText,
+      focusSummary,
+      focusNarrative,
+      model: CLAIM_EXTRACTION_MODEL,
+      temperature: MEDICAL_REPORT_TEMPERATURE,
+      maxTokens: CLAIM_EXTRACTION_MAX_TOKENS,
+      user,
+    });
+
+    const normalizedClaims: NewDocumentClaim[] = extractedClaims.map((claim) => ({
+      claimTitle: claim.claimTitle,
+      claimSummary: claim.claimSummary,
+      category: claim.category || "לא סווג",
+      confidence: typeof claim.confidence === "number" ? claim.confidence : null,
+      sourceExcerpt: claim.sourceExcerpt ?? null,
+      recommendation: claim.recommendation ?? null,
+      tags: Array.isArray(claim.tags) ? claim.tags : [],
+    }));
+
+    const savedClaims = await replaceDocumentClaims(id, docId, normalizedClaims);
+
+    return res.json({ documentId: docId, claims: savedClaims });
+  } catch (error) {
+    console.error("Claim extraction error:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to extract claims for this document", details: error instanceof Error ? error.message : undefined });
   }
 });
 

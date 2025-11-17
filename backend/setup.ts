@@ -84,14 +84,34 @@ const setupDatabase = async () => {
         );
     `);
 
-    console.log('6. Creating indexes...');
+    console.log('6. Creating case_document_claims table...');
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS case_document_claims (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            case_id UUID NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            document_id UUID NOT NULL REFERENCES case_documents(id) ON DELETE CASCADE,
+            sort_index INTEGER NOT NULL DEFAULT 0,
+            claim_title TEXT NOT NULL,
+            claim_summary TEXT NOT NULL,
+            category TEXT NOT NULL,
+            confidence NUMERIC(3,2),
+            source_excerpt TEXT,
+            recommendation TEXT,
+            tags TEXT[] DEFAULT '{}',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+
+    console.log('7. Creating indexes...');
     await client.query('CREATE INDEX IF NOT EXISTS idx_cases_owner ON cases(owner);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_case_documents_case_id ON case_documents(case_id);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_ai_usage_case_id ON ai_usage_logs(case_id);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_ai_usage_created_at ON ai_usage_logs(created_at);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_claims_document_id ON case_document_claims(document_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_claims_case_id ON case_document_claims(case_id);');
 
 
-    console.log('7. Seeding initial users...');
+    console.log('8. Seeding initial users...');
     const usersToSeed = [
       { username: 'admin', password: 'admin123', role: 'admin' },
       { username: 'lior', password: 'lior123', role: 'user' },

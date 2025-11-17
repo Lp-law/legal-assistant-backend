@@ -75,3 +75,27 @@ npm start
 ```
 
 The server will start, by default, on `http://localhost:3001`.
+
+## Configuration Notes
+
+| Variable | Description |
+| --- | --- |
+| `MEDICAL_REPORT_MODEL` | Override the default OpenAI model used for deep medical reports. |
+| `MEDICAL_REPORT_TEMPERATURE` | Temperature for medical reports (default `0.25`). |
+| `INITIAL_REPORT_MAX_TOKENS` | Maximum completion tokens for the initial medical report. |
+| `COMPARISON_REPORT_MAX_TOKENS` | Maximum completion tokens for the comparison report. |
+| `MEDICAL_REPORT_DEPTH` | Hint for AI verbosity (`deep` / `concise`). |
+| `CLAIM_EXTRACTION_MODEL` | *(Optional)* Dedicated model for automatic claim extraction (defaults to `MEDICAL_REPORT_MODEL`). |
+| `CLAIM_EXTRACTION_MAX_TOKENS` | *(Optional)* Max tokens for claim extraction responses (default `1200`). |
+| `MAX_REFERENCES_PER_DOCUMENT` | Number of reference snippets detected per document (default `4`). |
+| `MAX_REFERENCES_PER_REPORT` | Total reference snippets per AI call (default `10`). |
+| `SEMANTIC_SCHOLAR_API_KEY` | API key for Semantic Scholar to enrich literature lookups. |
+
+## Automatic Claim Extraction
+
+The backend now supports structured extraction of plaintiff claims from each uploaded expert opinion:
+
+- `GET /api/cases/:caseId/documents/:docId/claims` – fetch stored claims for a document.
+- `POST /api/cases/:caseId/documents/:docId/claims/extract` – regenerate the claims with AI (results are persisted in the `case_document_claims` table).
+
+These endpoints power the new UI panel that lists medical allegations before building the full reports, helping reviewers validate the AI's understanding of each expert opinion.
