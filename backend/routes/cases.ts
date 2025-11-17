@@ -5,6 +5,12 @@ import { authMiddleware } from "../middleware/authMiddleware.js";
 import pool from "../db.js";
 import { extractTextFromBuffer, resolveDocumentType } from "../services/documentProcessor.js";
 import { callOpenAI } from "../services/aiClient.js";
+import {
+  detectReferenceCandidates,
+  resolveLiteratureReferences,
+  type CitationCandidate,
+  type ResolvedLiteratureItem,
+} from "../services/medicalLiteratureService.js";
 import type {
   AiUsageLogRow,
   AppState,
@@ -50,6 +56,46 @@ const uploadDocumentsMiddleware = upload.array("files");
 
 const DOCUMENT_PREVIEW_LENGTH = 400;
 const PROMPT_DOCUMENT_CHAR_LIMIT = 6000;
+const FOCUS_OPTION_LABELS: Record<string, string> = {
+  negligence: "רשלנות",
+  causation: "קשר סיבתי",
+  lifeExpectancy: "תוחלת חיים / נזק",
+};
+const DEFAULT_MAX_REFERENCES_PER_DOCUMENT = 4;
+const DEFAULT_MAX_REFERENCES_PER_REPORT = 10;
+const DEFAULT_INITIAL_REPORT_TOKENS = 2400;
+const DEFAULT_COMPARISON_REPORT_TOKENS = 2000;
+const DEFAULT_MEDICAL_REPORT_TEMPERATURE = 0.25;
+
+const configuredMaxReferencesPerDoc = Number(process.env.MAX_REFERENCES_PER_DOCUMENT ?? `${DEFAULT_MAX_REFERENCES_PER_DOCUMENT}`);
+const configuredMaxReferencesPerReport = Number(process.env.MAX_REFERENCES_PER_REPORT ?? `${DEFAULT_MAX_REFERENCES_PER_REPORT}`);
+const MAX_REFERENCES_PER_DOCUMENT =
+  Number.isFinite(configuredMaxReferencesPerDoc) && configuredMaxReferencesPerDoc > 0
+    ? configuredMaxReferencesPerDoc
+    : DEFAULT_MAX_REFERENCES_PER_DOCUMENT;
+const MAX_REFERENCES_PER_REPORT =
+  Number.isFinite(configuredMaxReferencesPerReport) && configuredMaxReferencesPerReport > 0
+    ? configuredMaxReferencesPerReport
+    : DEFAULT_MAX_REFERENCES_PER_REPORT;
+
+const MEDICAL_REPORT_MODEL =
+  process.env.MEDICAL_REPORT_MODEL || process.env.OPENAI_MEDICAL_MODEL || "gpt-4.1-mini";
+const configuredInitialTokens = Number(process.env.INITIAL_REPORT_MAX_TOKENS ?? `${DEFAULT_INITIAL_REPORT_TOKENS}`);
+const configuredComparisonTokens = Number(process.env.COMPARISON_REPORT_MAX_TOKENS ?? `${DEFAULT_COMPARISON_REPORT_TOKENS}`);
+const INITIAL_REPORT_MAX_TOKENS =
+  Number.isFinite(configuredInitialTokens) && configuredInitialTokens > 0
+    ? configuredInitialTokens
+    : DEFAULT_INITIAL_REPORT_TOKENS;
+const COMPARISON_REPORT_MAX_TOKENS =
+  Number.isFinite(configuredComparisonTokens) && configuredComparisonTokens > 0
+    ? configuredComparisonTokens
+    : DEFAULT_COMPARISON_REPORT_TOKENS;
+const configuredTemperature = Number(process.env.MEDICAL_REPORT_TEMPERATURE ?? `${DEFAULT_MEDICAL_REPORT_TEMPERATURE}`);
+const MEDICAL_REPORT_TEMPERATURE =
+  Number.isFinite(configuredTemperature) && configuredTemperature >= 0
+    ? configuredTemperature
+    : DEFAULT_MEDICAL_REPORT_TEMPERATURE;
+const MEDICAL_REPORT_DEPTH = (process.env.MEDICAL_REPORT_DEPTH ?? "deep").toLowerCase();
 
 const garbledFilenamePattern = /[ÃÂÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/;
 
@@ -156,6 +202,174 @@ const formatFileSize = (size: number) => {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const describeFocusOptions = (options: FocusOptions) => {
+  const labels = Object.entries(options)
+    .filter(([, enabled]) => enabled)
+    .map(([key]) => FOCUS_OPTION_LABELS[key] ?? key);
+  return labels.length ? labels.join(", ") : "לא נבחרו נקודות פוקוס";
+};
+
+const isLikelyExpertOpinion = (doc: CaseDocument) => {
+  const filename = doc.originalFilename.toLowerCase();
+  const keywords = ["חוות", "expert", "opinion", "report", "מומח", "חוו\"ד", "expertise"];
+  return keywords.some((keyword) => filename.includes(keyword));
+};
+
+const buildExpertOpinionsBlock = (docs: CaseDocument[]) => {
+  if (!docs.length) {
+    return "לא נמצאו חוות דעת רפואיות בתיק.";
+  }
+  return docs
+    .map((doc, index) => {
+      const summary = truncateForPrompt(doc.extractedText);
+      return [
+        `חוות דעת ${index + 1}: ${doc.originalFilename}`,
+        `מזהה מסמך: ${doc.id} | הועלה ב-${new Date(doc.createdAt).toLocaleString("he-IL")}`,
+        `גודל קובץ: ${formatFileSize(doc.sizeBytes)}`,
+        "תוכן מסוכם:",
+        summary,
+      ].join("\n");
+    })
+    .join("\n\n");
+};
+
+const formatResolvedReferences = (items: ResolvedLiteratureItem[]) => {
+  if (!items.length) {
+    return "לא אותרו מאמרים רלוונטיים באופן אוטומטי.";
+  }
+  return items
+    .map((item, index) => {
+      const authors = item.authors && item.authors.length ? `מחברים: ${item.authors.join(", ")}` : "מחברים: לא זוהו";
+      const sourceDoc = item.matchedCitation.sourceDocumentName
+        ? `מקור בחוות דעת: ${item.matchedCitation.sourceDocumentName}`
+        : undefined;
+      const pieces = [
+        `מקור ${index + 1}: ${item.title}`,
+        sourceDoc,
+        authors,
+        item.journal ? `כתב עת: ${item.journal}` : undefined,
+        item.year ? `שנה: ${item.year}` : undefined,
+        item.abstract ? `תקציר: ${item.abstract}` : undefined,
+        item.url ? `קישור: ${item.url}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return pieces;
+    })
+    .join("\n\n");
+};
+
+const formatUnresolvedCitations = (items: CitationCandidate[]) => {
+  if (!items.length) {
+    return "אין ציטוטים שדרושים אימות נוסף.";
+  }
+  return items
+    .map((item, index) => {
+      const doc = item.sourceDocumentName ? ` (${item.sourceDocumentName})` : "";
+      return `ציטוט ${index + 1}${doc}: ${item.rawText}`;
+    })
+    .join("\n");
+};
+
+const inferExpertSpecialty = (filename: string) => {
+  const normalized = filename.toLowerCase();
+  if (normalized.includes("אונקול") || normalized.includes("oncolog")) {
+    return "אונקולוגיה";
+  }
+  if (normalized.includes("רדיולוג") || normalized.includes("radiolog")) {
+    return "רדיולוגיה";
+  }
+  if (normalized.includes("כירורג") || normalized.includes("surgery") || normalized.includes("surgeon")) {
+    return "כירורגיה";
+  }
+  if (normalized.includes("גסטרו") || normalized.includes("gastro")) {
+    return "גסטרואנטרולוגיה";
+  }
+  if (normalized.includes("פתולוג")) {
+    return "פתולוגיה";
+  }
+  return "תחום לא זוהה";
+};
+
+const buildInitialReportPrompt = (options: {
+  caseName: string;
+  owner: string;
+  focusSummary: string;
+  focusNarrative: string;
+  detailedDocBlock: string;
+  literatureSummaryText: string;
+  unresolvedCitationsText: string;
+  depthHint: string;
+}) => {
+  const {
+    caseName,
+    owner,
+    focusSummary,
+    focusNarrative,
+    detailedDocBlock,
+    literatureSummaryText,
+    unresolvedCitationsText,
+    depthHint,
+  } = options;
+
+  const sections: string[] = [
+    "🔬 פרומפט ניתוח חוות דעת רפואיות – עומק מקסימלי עבור ההגנה.",
+    "",
+    "מטרה: לפרק ולנתח כל טענת מומחה תביעה עד לרמת הראיה, להשוות מול ספרות עדכנית, ולהפיק דו\"ח מפורט עבור מומחה ההגנה. השתמש בשפה רפואית-עובדתית בלבד.",
+    "",
+    "נתוני מסגרת:",
+    `- שם תיק: ${caseName}`,
+    `- בעלים: ${owner}`,
+    `- נקודות פוקוס שסומנו: ${focusSummary}`,
+    `- טקסט פוקוס חופשי: ${focusNarrative}`,
+    "",
+    "חוות דעת זמינות (חובה להתייחס לכל אחת בנפרד ולהזכירן בשמן לאורך הדו\"ח):",
+    detailedDocBlock,
+    "",
+    "מקורות ספרות שאותרו אוטומטית (שלב אותם בסקירה או פרט מדוע אינם מתאימים):",
+    literatureSummaryText,
+    "",
+    "ציטוטים לא אומתו:",
+    unresolvedCitationsText,
+    "",
+    "### תהליך חובה:",
+    "1. עבור כל מומחה תביעה — פרט עובדות, נזק נטען, סטייה/מחדל, קשר סיבתי, והערות ראשוניות על איכות הראיות.",
+    "2. הפק רשימת סוגיות רפואיות במחלוקת (פרוצדורה, סטנדרט טיפול, אבחון, פרוגנוזה, קשר סיבתי).",
+    "3. צור מילות חיפוש באנגלית לכל סוגיה (3–8 מונחים: Clinical terms, Imaging, ICD, Treatment, Study type).",
+    "4. שלב מקורות מה-10–15 השנים האחרונות (Reviews, Meta-analysis, Guidelines, RCTs) עם ציון תמיכה/סתירה, רלוונטיות וטיעון להגנה.",
+    "5. החזר דו\"ח במבנה המדויק שלהלן (Markdown). כל סעיף צריך להיות מפורט ועשיר.",
+    "",
+    "### מבנה דו\"ח מחייב:",
+    "# ניתוח מומחה + סקירת ספרות רפואית",
+    "## א. סיכום עובדתי של המקרה",
+    "## ב. טענות עיקריות של מומחה/מומחי התביעה",
+    "- רשימת bullet נפרדת לכל מומחה, עם ציטוטים מן המסמך.",
+    "## ג. נקודות חולשה / אי־דיוקים / סתירות בחוות הדעת",
+    "- טבלה: | חוות דעת | טענה מצוטטת | בעיה רפואית | מה נדרש להשלמה |",
+    "## ד. רשימת הסוגיות הרפואיות במחלוקת",
+    "## ה. מילות חיפוש באנגלית",
+    "- עבור כל סוגיה מסעיף ד' ציין 3–8 מונחים (Clinical / Imaging / ICD / Treatment / Study).",
+    "## ו. רשימת מאמרים רלוונטיים",
+    "- טבלה: | נושא | שם המאמר | שנה | כתב עת | סיכום (2–4 משפטים) | תומך/סותר | רלוונטיות | טיעון להגנה | קישור/DOI |",
+    "## ז. מסקנות רפואיות עיקריות מהספרות",
+    "## ח. יישום רפואי לטובת ההגנה",
+    "- טיעונים חזקים לטובת ההגנה עם ציון מקור.",
+    "- נקודות מסוכנות הדורשות התייחסות.",
+    "- מומחים משלימים שכדאי לגייס (ולמה).",
+    "- 10–15 שאלות רפואיות מבוססות ספרות למומחה ההגנה.",
+    "## ט. מילות/משפטי חיפוש מומלצים בעברית ובאנגלית",
+    "- לפחות שש הצעות (שילוב עברית/אנגלית).",
+    "",
+    "### הנחיות משלימות:",
+    "- עבור כל מונח רפואי פרט פתופיזיולוגיה/טיפול/ICD-10 אם רלוונטי.",
+    "- במידת הצורך הוסף `[IDEA_FOR_DIAGRAM]: ...`.",
+    "- שלב את מקורות הספרות שנמצאו אוטומטית יחד עם מקורות נוספים.",
+    `- רמת הפירוט צריכה להיות ${depthHint}.`,
+  ];
+
+  return sections.join("\n");
 };
 
 const mapAiLogToEvent = (log: AiUsageLogRow): CaseActivityEvent => {
@@ -635,63 +849,69 @@ router.post("/:id/initial-report", async (req: Request, res: Response) => {
     await setCaseAppState(id, "processing");
     const documents = await getCaseDocuments(id);
 
-    const documentsContext = documents.length
-      ? documents
-          .map(
-            (doc, index) =>
-              `Document ${index + 1}: ${doc.originalFilename}\nUploaded at: ${new Date(doc.createdAt).toISOString()}\nContent:\n${truncateForPrompt(
-                doc.extractedText
-              )}`
-          )
-          .join("\n\n")
-      : "No supporting documents were uploaded.";
+    const expertOpinionDocs = documents.filter(isLikelyExpertOpinion);
+    const docsForAnalysis = expertOpinionDocs.length ? expertOpinionDocs : documents;
+    const detailedDocBlock = docsForAnalysis
+      .map((doc, index) => {
+        const specialty = inferExpertSpecialty(doc.originalFilename);
+        return [
+          `חוות דעת ${index + 1}: ${doc.originalFilename}`,
+          `תחום מוערך: ${specialty}`,
+          `מזהה מסמך: ${doc.id}`,
+          `טקסט מסוכם (קרא לעומק והשתמש ישירות בניתוח):`,
+          truncateForPrompt(doc.extractedText),
+        ].join("\n");
+      })
+      .join("\n\n");
 
-    const focusSummary =
-      Object.entries(caseRow.focus_options)
-        .filter(([, enabled]) => enabled)
-        .map(([key]) => key)
-        .join(", ") || "None selected";
+    const focusSummary = describeFocusOptions(caseRow.focus_options);
+    const focusNarrative = caseRow.focus_text?.trim() ? caseRow.focus_text.trim() : "לא נמסר טקסט פוקוס.";
 
-    const prompt = `
-You are an experienced medical-legal analyst. Review the malpractice case information and produce a structured report for defense counsel. IMPORTANT: Write the entire report in professional Hebrew (ישראלית), including titles and sections.
+    const citationCandidates = docsForAnalysis.flatMap((doc) =>
+      detectReferenceCandidates(doc.extractedText, {
+        limit: MAX_REFERENCES_PER_DOCUMENT,
+        sourceDocumentId: doc.id,
+        sourceDocumentName: doc.originalFilename,
+      })
+    );
+    const scopedCitationCandidates = citationCandidates.slice(0, MAX_REFERENCES_PER_REPORT);
 
-Critical instructions:
-1. Write as if you performed a comprehensive search across Israeli and international medical databases (כולל Google Scholar) and integrate plausible literature you would find.
-2. Whenever you mention a medical/physiological term, add a short explanation in parentheses immediately after the term.
-3. Use rich, detailed paragraphs—never be terse.
-4. For every literature reference include a clickable URL. If you cannot provide the exact link, create a Google Scholar search link in the form https://scholar.google.com/scholar?q=<encoded keywords>.
-5. Provide at least three literature sources relevant to the defense.
+    let literatureSummaryText = "לא אותרו מקורות ספרותיים באופן אוטומטי.";
+    let unresolvedCitationsText = "אין ציטוטים הדורשים אימות נוסף.";
 
-Case Name: ${caseRow.name}
-Owner: ${caseRow.owner}
-Focus Options Selected: ${focusSummary}
-Focus Notes:
-${caseRow.focus_text || "No additional focus text provided."}
+    try {
+      const literatureResult = await resolveLiteratureReferences(scopedCitationCandidates);
+      literatureSummaryText = formatResolvedReferences(literatureResult.resolved);
+      unresolvedCitationsText = formatUnresolvedCitations(literatureResult.unresolved);
+    } catch (error) {
+      console.warn("Literature enrichment failed:", error);
+      literatureSummaryText = "איתור המאמרים האוטומטי נכשל – אנא בצעו חיפוש ידני להצלבת מקורות.";
+      unresolvedCitationsText = formatUnresolvedCitations(scopedCitationCandidates);
+    }
 
-Supporting Documents:
-${documentsContext}
-
-כתוב את הדו"ח במבנה הבא (עדיין בעברית):
-1. כותרת: "ניתוח מקדמי של טענות התובע".
-2. פסקת פתיחה מפורטת המבהירה את מטרת המסמך ואת היקף סריקת הספרות שבוצעה.
-3. סעיף א – תקציר עמוק של המקרה והטענות המרכזיות של התובע, כולל הסבר לכל מונח רפואי.
-4. סעיף ב – נקודות חולשה פוטנציאליות בטענות התובע (תתי-סעיפים לרשלנות, קשר סיבתי, נזק/תוחלת חיים) עם נימוקים רפואיים מפורטים.
-5. סעיף ג – ספרות רפואית רלוונטית להגנה. עבור כל מקור ציין: שם המאמר, כתב עת, שנה, תקציר השימוש להגנה וקישור שניתן ללחוץ עליו (עדיף DOI; אחרת Google Scholar).
-6. סעיף ד – הנחיות מעשיות ונקודות מיקוד למומחה ההגנה, כולל הסבר למה כל צעד חשוב.
-7. סעיף ה – מידע חסר והמלצות להמשך.
-8. סעיף ו – מילות/משפטי חיפוש מומלצים בעברית ובאנגלית (לפחות שש הצעות) להמשך חיפוש ספרות, מבוסס על הנתונים שבמסמכים.
-
-הסגנון צריך להיות מקצועי, אנליטי ונייטרלי, ללא ניסוח של ייעוץ משפטי.`;
+    const prompt = buildInitialReportPrompt({
+      caseName: caseRow.name,
+      owner: caseRow.owner,
+      focusSummary,
+      focusNarrative,
+      detailedDocBlock,
+      literatureSummaryText,
+      unresolvedCitationsText,
+      depthHint: MEDICAL_REPORT_DEPTH === "concise" ? "גבוהה למרות הדרישה לתמצות" : "מעמיקה ומפורטת",
+    });
 
     const reportText = await callOpenAI({
       messages: [
         {
           role: "system",
-          content: "You are a meticulous medical-legal analyst supporting defense counsel. Always answer in fluent Hebrew.",
+          content:
+            "You are a senior medical expert witness who writes exhaustive Hebrew analyses of plaintiff expert opinions. Remain strictly medical; avoid legal terminology.",
         },
         { role: "user", content: prompt },
       ],
-      maxTokens: 2200,
+      model: MEDICAL_REPORT_MODEL,
+      temperature: MEDICAL_REPORT_TEMPERATURE,
+      maxTokens: INITIAL_REPORT_MAX_TOKENS,
       metadata: { caseId: id, user, action: "initial-report" },
     });
 
@@ -758,42 +978,116 @@ router.post("/:id/comparison-report", async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Selected documents do not contain extracted text yet." });
     }
 
+    const focusSummary = describeFocusOptions(caseRow.focus_options);
+    const focusNarrative = caseRow.focus_text?.trim() ? caseRow.focus_text.trim() : "לא נמסר טקסט פוקוס.";
+
+    const docABlock = [
+      `חוות דעת א (${docA.originalFilename})`,
+      `מזהה: ${docA.id}`,
+      `תחום משוער: ${inferExpertSpecialty(docA.originalFilename)}`,
+      "עיקרי הטענות והנתונים:",
+      truncateForPrompt(docAText),
+    ].join("\n");
+
+    const docBBlock = [
+      `חוות דעת ב (${docB.originalFilename})`,
+      `מזהה: ${docB.id}`,
+      `תחום משוער: ${inferExpertSpecialty(docB.originalFilename)}`,
+      "עיקרי הטענות והנתונים:",
+      truncateForPrompt(docBText),
+    ].join("\n");
+
+    const docACitations = detectReferenceCandidates(docAText, {
+      limit: MAX_REFERENCES_PER_DOCUMENT,
+      sourceDocumentId: docA.id,
+      sourceDocumentName: docA.originalFilename,
+    });
+    const docBCitations = detectReferenceCandidates(docBText, {
+      limit: MAX_REFERENCES_PER_DOCUMENT,
+      sourceDocumentId: docB.id,
+      sourceDocumentName: docB.originalFilename,
+    });
+    const combinedCitations = [...docACitations, ...docBCitations].slice(0, MAX_REFERENCES_PER_REPORT);
+
+    let comparisonLiteratureText = "לא אותרו מקורות ספרותיים רלוונטיים באופן אוטומטי.";
+    let comparisonUnresolvedText = "אין ציטוטים שדורשים בדיקה נוספת.";
+
+    try {
+      const literatureResult = await resolveLiteratureReferences(combinedCitations);
+      comparisonLiteratureText = formatResolvedReferences(literatureResult.resolved);
+      comparisonUnresolvedText = formatUnresolvedCitations(literatureResult.unresolved);
+    } catch (error) {
+      console.warn("Comparison literature enrichment failed:", error);
+      comparisonLiteratureText = "איתור מקורות אוטומטי נכשל. יש להשלים חיפוש ספרות עצמאי.";
+      comparisonUnresolvedText = formatUnresolvedCitations(combinedCitations);
+    }
+
     const prompt = `
-אתה מומחה רפואי-משפטי. השווה בין שתי חוות דעת רפואיות באותו תיק רשלנות רפואית. חשוב: כתוב את כל הדו"ח בעברית מקצועית, מעמיקה ומאוזנת.
+🔬 דו"ח השוואה רפואית בין מומחה התביעה (מסמך א) למומחה ההגנה (מסמך ב).
 
-הנחיות קריטיות:
-1. התייחס כאילו ביצעת סקירה עדכנית בכל מאגרי הספרות (כולל Google Scholar) והכלל מקורות עם קישורים קליקביליים (או קישור חיפוש אם הקישור המדויק אינו ידוע).
-2. עבור כל מונח רפואי או הליך, הוסף הסבר קצר בסוגריים.
-3. כתוב ניתוחים ארוכים ומבוססי ראיות – בלי קיצור.
-4. הוסף לפחות שלושה מקורות ספרות עם תקציר וקישור.
+יעד: השוואה קלינית מעמיקה שמזהה מי מהשניים מציג טיעון רפואי משכנע יותר בכל סוגיה, על בסיס הנתונים בחוות הדעת והספרות העדכנית. עבודתך רפואית בלבד – אין להשתמש בשפה משפטית.
 
-שם התיק: ${caseRow.name}
-הערות פוקוס: ${caseRow.focus_text || "אין הערות מיוחדות"}
+הנחות: חוות דעת א מייצגת את מומחה התביעה; חוות דעת ב מייצגת את מומחה ההגנה (באותו תחום מומחיות או תחומים משיקים). אם קיימים מספר תחומי מומחיות, פצל את הניתוח בהתאם.
 
-חוות דעת א (${docA.originalFilename}):
-${truncateForPrompt(docAText)}
+נתוני מסגרת:
+- שם תיק: ${caseRow.name}
+- נקודות פוקוס שסומנו: ${focusSummary}
+- טקסט פוקוס: ${focusNarrative}
 
-חוות דעת ב (${docB.originalFilename}):
-${truncateForPrompt(docBText)}
+חוות דעת שנבדקות:
+${docABlock}
 
-בנה דו"ח בעברית עם המבנה הבא:
-1. תקציר מפורט לכל חוות דעת, כולל הסבר לכל מושג רפואי.
-2. נקודות הסכמה והבדלים בין חוות הדעת לפי: אבחנה, קשר סיבתי, סטנדרט טיפול, נזק/פרוגנוזה/תוחלת חיים – עם נימוקים רפואיים.
-3. הערכת חוזק הראיות של כל צד (מי מסתמך על מקורות חזקים יותר ולמה) והצגת רשימת מקורות עם קישורים לחיצים.
-4. המלצות אופרטיביות לצוות ההגנה – אילו נתונים לחפש, אילו שאלות להעלות, אילו מקורות ספרות לבדוק – כולל הסבר לכל נקודה.
-5. מילות/משפטי חיפוש מומלצים בעברית ובאנגלית (לפחות שש הצעות) לגיבוש חיפוש ספרות ייעודי.
+${docBBlock}
 
-שמור על טון נייטרלי, אנליטי ולא משפטי.`;
+מקורות ספרות שאותרו:
+${comparisonLiteratureText}
+
+ציטוטים לא פתורים (דורשים אימות):
+${comparisonUnresolvedText}
+
+### שלבי העבודה:
+1. **סיכום נפרד לכל מומחה** – עובדות, אבחנות, ממצאים ודגשים טיפוליים שהם מציפים.
+2. **זיהוי נקודות הסכמה** – במה שני המומחים מסכימים (אבחנה, טיפול, מנגנון, פרוגנוזה).
+3. **זיהוי נקודות מחלוקת** – עבור כל סוגיה (אבחנה, סטנדרט טיפול, קשר סיבתי, נזק): מה טוען מומחה התביעה, מה טוען מומחה ההגנה, ומה המשמעות הקלינית.
+4. **ניתוח ביקורתי לפי תחום** – בדיקות שעליהן כל צד מסתמך, איכות הראיות, שימוש בספרות, פערים או הנחות לא מבוססות.
+5. **בדיקת הספרות** – מי מסתמך על מקורות חזקים יותר, האם הציטוטים תומכים באמת בטענה, אילו מאמרים נוספים מאשרים או סותרים כל טיעון.
+6. **הכרעה מקצועית בכל נקודה** – קבע איזו חוות דעת משכנעת יותר (תביעה או הגנה) בכל סוגיה, ונמק על בסיס מדע נתונים/ספרות. אם חסר מידע – ציין זאת.
+7. **המלצות המשך** – אילו בדיקות/חוות דעת נוספות נדרשות, אילו שאלות להפנות למומחה ההגנה, ואילו מושגים מחייבים הבהרה.
+
+### מבנה דו"ח נדרש:
+📄 תקציר רפואי לכל חוות דעת (מי המומחה, תחום, עיקרי הנתונים).
+⚖️ טבלת/רשימת הסכמה ומחלוקת לפי נושאים (אבחנה, טיפול, מנגנון פגיעה, סיבתיות, נזק).
+🔍 השוואה ביקורתית לפי תחום:
+   - טענות התביעה | טענות ההגנה | ניתוח מדעי | מי משכנע יותר ולמה | אילו נתונים חסרים.
+📚 התאמה לספרות רפואית:
+   - עבור כל נושא, ציין מקורות רלוונטיים (שם, שנה, כתב עת, סיכום קצר, האם תומך/סותר).
+   - הדגש אם המומחה עושה שימוש מדויק או מוטה בספרות.
+🧠 מסקנות רפואיות:
+   - טיעונים חזקים לטובת ההגנה.
+   - טיעונים חזקים של התביעה שדורשים מענה.
+   - רשימת מומחים משלימים שכדאי לערב (לפי תחום).
+❓ שאלות למומחה ההגנה (לפחות 8–10) המבוססות על הפערים שזיהית.
+🧾 מילות/משפטי חיפוש באנגלית (3–8 לכל סוגיה רפואית).
+
+### הנחיות כלליות:
+- הסבר כל מונח מקצועי, כולל פתופיזיולוגיה כאשר רלוונטי.
+- שמור על ניתוח רפואי נטו; אל תשתמש במונחים משפטיים.
+- אם המחשה ויזואלית תסייע, הוסף בלוק \`[IDEA_FOR_DIAGRAM]: ...\`.
+- סיים בכל תחום בהכרעה: “מסקנה: טענת התביעה/ההגנה משכנעת יותר משום ש…”.
+`;
 
     const comparisonText = await callOpenAI({
       messages: [
         {
           role: "system",
-          content: "You are an impartial medical-legal analyst comparing expert opinions. Always respond in Hebrew.",
+          content:
+            "You are a senior medical expert who compares expert opinions entirely from a clinical perspective. Always answer in Hebrew and avoid legal commentary.",
         },
         { role: "user", content: prompt },
       ],
-      maxTokens: 1600,
+      model: MEDICAL_REPORT_MODEL,
+      temperature: MEDICAL_REPORT_TEMPERATURE,
+      maxTokens: COMPARISON_REPORT_MAX_TOKENS,
       metadata: { caseId: id, user, action: "comparison-report" },
     });
 

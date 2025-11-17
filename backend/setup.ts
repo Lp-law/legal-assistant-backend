@@ -65,12 +65,33 @@ const setupDatabase = async () => {
         );
     `);
     
-    console.log('5. Creating indexes...');
+    console.log('5. Creating ai_usage_logs table...');
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS ai_usage_logs (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            case_id UUID NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            username VARCHAR(50) NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+            action TEXT NOT NULL,
+            status TEXT NOT NULL,
+            model TEXT,
+            duration_ms INTEGER,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
+            cost_usd NUMERIC(12,6),
+            error_message TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+
+    console.log('6. Creating indexes...');
     await client.query('CREATE INDEX IF NOT EXISTS idx_cases_owner ON cases(owner);');
     await client.query('CREATE INDEX IF NOT EXISTS idx_case_documents_case_id ON case_documents(case_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_ai_usage_case_id ON ai_usage_logs(case_id);');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_ai_usage_created_at ON ai_usage_logs(created_at);');
 
 
-    console.log('6. Seeding initial users...');
+    console.log('7. Seeding initial users...');
     const usersToSeed = [
       { username: 'admin', password: 'admin123', role: 'admin' },
       { username: 'lior', password: 'lior123', role: 'user' },

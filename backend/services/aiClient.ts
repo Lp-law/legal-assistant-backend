@@ -24,6 +24,27 @@ interface CallOpenAIOptions {
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_API_URL = process.env.OPENAI_API_URL || "https://api.openai.com/v1/chat/completions";
+const INPUT_COST_PER_1K = Number(process.env.OPENAI_INPUT_COST_PER_1K ?? "0.15");
+const OUTPUT_COST_PER_1K = Number(process.env.OPENAI_OUTPUT_COST_PER_1K ?? "0.60");
+
+interface OpenAIUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+const toNumberOrNull = (value: unknown): number | null =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+const estimateCostUsd = (promptTokens: number | null, completionTokens: number | null): number | null => {
+  const promptCost = promptTokens ? (promptTokens / 1000) * INPUT_COST_PER_1K : 0;
+  const completionCost = completionTokens ? (completionTokens / 1000) * OUTPUT_COST_PER_1K : 0;
+  const combined = promptCost + completionCost;
+  if (!Number.isFinite(combined) || combined === 0) {
+    return null;
+  }
+  return Number(combined.toFixed(6));
+};
 
 if (!OPENAI_API_KEY) {
   console.warn("OPENAI_API_KEY is not defined. AI endpoints will fail until it is configured.");
@@ -68,27 +89,41 @@ export const callOpenAI = async (options: CallOpenAIOptions): Promise<string> =>
 
     const content: string | undefined = data?.choices?.[0]?.message?.content;
     const cleanedContent = content?.trim() ?? "";
+    const usage: OpenAIUsage | undefined = data?.usage;
+    const promptTokens = toNumberOrNull(usage?.prompt_tokens);
+    const completionTokens = toNumberOrNull(usage?.completion_tokens);
+    const totalTokens =
+      toNumberOrNull(usage?.total_tokens) ??
+      (promptTokens !== null && completionTokens !== null ? promptTokens + completionTokens : null);
+    const costUsd = estimateCostUsd(promptTokens, completionTokens);
+    const durationMs = Date.now() - startedAt;
 
     if (metadata) {
-      logAiEvent({
+      await logAiEvent({
         caseId: metadata.caseId,
         username: metadata.user.username,
         action: metadata.action,
         status: "success",
-        durationMs: Date.now() - startedAt,
+        durationMs,
+        model,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        costUsd,
       });
     }
 
     return cleanedContent;
   } catch (error) {
     if (metadata) {
-      logAiEvent({
+      await logAiEvent({
         caseId: metadata.caseId,
         username: metadata.user.username,
         action: metadata.action,
         status: "error",
         durationMs: Date.now() - startedAt,
         errorMessage: error instanceof Error ? error.message : String(error),
+        model,
       });
     }
     throw error;

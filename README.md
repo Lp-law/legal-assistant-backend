@@ -12,6 +12,7 @@ This is a full-stack web application designed to assist lawyers representing doc
     - **Initial Report Generation**: OpenAI (configurable) analyzes uploaded documents plus case focus instructions and returns a structured defense-oriented report.
     - **Comparative Analysis**: Pick two expert opinions from the case and get an AI-generated comparison highlighting agreements, disagreements, and strategy guidance.
     - **Executive Summaries / Copy to Clipboard**: Reports are rendered with pre-wrap formatting for quick review and export.
+- **Medical Literature Enrichment**: The backend scans expert opinions for citations, hits Semantic Scholar / CrossRef, and feeds curated abstracts + metadata back into the AI prompt so it can verify whether plaintiffs' experts rely on the literature accurately.
 - **Literature Search Panel**: Ask a focused clinical / medico-legal question and receive curated article leads with summaries and implications for the defense.
 - **Audit-Friendly Logging**: All AI calls are logged with case/user metadata (no PHI), so activity can be traced when needed.
 - **Focused Analysis**: Users can guide the AI's focus towards specific legal points like negligence, causation, or life expectancy.
@@ -42,9 +43,17 @@ Create a `.env` file inside `backend/` with:
 | `JWT_SECRET` | Secret used for JWT signing. |
 | `FRONTEND_URL` | Allowed origin for CORS (e.g., `https://medical-assistant-qgwi.onrender.com`). |
 | `OPENAI_API_KEY` | OpenAI API key with access to GPT-4o/GPT-4.1 (required for AI features). |
-| `OPENAI_MODEL` | *(Optional)* Override default OpenAI model. |
+| `OPENAI_MODEL` | *(Optional)* Override default OpenAI model for general AI calls. |
+| `MEDICAL_REPORT_MODEL` | *(Optional)* Dedicated model for the deep medical reports (default `gpt-4.1-mini`). |
+| `MEDICAL_REPORT_TEMPERATURE` | *(Optional)* Temperature for medical reports (default `0.25`). |
+| `INITIAL_REPORT_MAX_TOKENS` | *(Optional)* Max tokens for initial report output (default `2400`). |
+| `COMPARISON_REPORT_MAX_TOKENS` | *(Optional)* Max tokens for comparison report output (default `2000`). |
+| `MEDICAL_REPORT_DEPTH` | *(Optional)* `deep` (default) or `concise` – hints to the AI about desired verbosity. |
 | `MAX_UPLOAD_SIZE_MB` | *(Optional)* Max size per uploaded document in MB (default `25`). |
 | `MAX_UPLOAD_FILES` | *(Optional)* Max number of documents per request (default `5`). |
+| `MAX_REFERENCES_PER_DOCUMENT` | *(Optional)* How many references to auto-detect per document (default `4`). |
+| `MAX_REFERENCES_PER_REPORT` | *(Optional)* Global cap on references per AI call (default `10`). |
+| `SEMANTIC_SCHOLAR_API_KEY` | *(Optional)* API key for Semantic Scholar to improve literature lookups. |
 
 Frontend (inside `legal-assistant-frontend/.env`):
 
@@ -53,6 +62,10 @@ VITE_API_BASE_URL=http://localhost:3001
 ```
 
 > When deployed, point `VITE_API_BASE_URL` to the Render backend URL.
+
+### Medical Literature Service
+
+`backend/services/medicalLiteratureService.ts` scans expert opinions for references, detects likely citations, and tries to enrich them via Semantic Scholar (preferred) or CrossRef. The resolved abstracts, journal info, and URLs are injected into the AI prompts for both the initial and comparison medical reports so that the AI can check whether a cited article truly supports the expert's claim. You can tune how many references are inspected via `MAX_REFERENCES_PER_DOCUMENT` / `MAX_REFERENCES_PER_REPORT`, and optionally provide `SEMANTIC_SCHOLAR_API_KEY` for higher rate limits.
 
 ---
 

@@ -5,6 +5,7 @@ import cookieParser from "cookie-parser";
 
 import authRouter from "./routes/auth.js";
 import casesRouter from "./routes/cases.js";
+import adminRouter from "./routes/admin.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -54,6 +55,7 @@ app.get("/api/health", (_req: Request, res: Response) => {
 // Routes
 app.use("/api/auth", authRouter);
 app.use("/api/cases", casesRouter);
+app.use("/api/admin", adminRouter);
 
 // Start server
 app.listen(PORT, () => {
